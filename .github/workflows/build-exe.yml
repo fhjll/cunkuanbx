@@ -1,0 +1,71 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target Windows version"
+        type: choice
+        default: "win10"
+        options:
+          - win10
+          - win7
+
+jobs:
+  build-win10:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'win10' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --windowed --name 存保审核工具 --add-data "templates;templates" gui.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-win10-x64
+          path: dist/存保审核工具.exe
+
+  build-win7:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'win7' }}
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --windowed --name 存保审核工具_Win7 --add-data "templates;templates" gui.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-win7-x64
+          path: dist/存保审核工具_Win7.exe
