@@ -432,7 +432,8 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
       1. 从存款归属表读取"计算行"的个人存款和单位存款金额（万元）
       2. 从 IRP001 读取个人存款本金和单位存款本金（元）
       3. IRP001 数据扣除久悬户余额 → 除以10000 → 精确至万元
-      4. 与存款归属表的金额比较，不考虑误差，差额不为 0 即为不一致
+      4. 与存款归属表的金额比较，绝对容差 0.01 元
+         （仅消除浮点精度尾差，确保数据准确无误）
 
     参数:
         deposit_path (str): 存款归属表_已生成.xlsx 路径
@@ -490,8 +491,11 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     irp_gr_adj_wan = round(irp_gr_adj_yuan / 10000)
     irp_dw_adj_wan = round(irp_dw_adj_yuan / 10000)
 
+    # 绝对容差 0.01 元（仅消除浮点精度尾差，实际要求严格一致）
+    tol_yuan = 0.01
+
     msgs.append("========== 存款归属表 vs IRP001 校验 ==========")
-    msgs.append("校验逻辑: (IRP001本金 - 久悬户余额) / 10000 → 精确至万元 → 与存款归属表比较（无容差，差额不为0即不一致）")
+    msgs.append("校验逻辑: (IRP001本金 - 久悬户余额) / 10000 → 精确至万元 → 与存款归属表比较（绝对容差 0.01 元）")
 
     msgs.append("")
     msgs.append("--- 个人存款 ---")
@@ -501,7 +505,7 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     msgs.append(f"  精确至万元:                               {irp_gr_adj_wan:>16,.0f} 万元")
     msgs.append(f"  存款归属表 个人存款 (第{gr_row}行):           {gr_dep_wan:>16,.2f} 万元")
     gr_diff = abs(irp_gr_adj_wan - gr_dep_wan)
-    gr_ok = gr_diff == 0  # 万元级比较，无容差，差额不为0即不一致
+    gr_ok = gr_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.01 元
 
     msgs.append("")
     msgs.append("--- 单位存款 ---")
@@ -511,11 +515,11 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     msgs.append(f"  精确至万元:                               {irp_dw_adj_wan:>16,.0f} 万元")
     msgs.append(f"  存款归属表 单位存款 (第{dw_row}行):           {dw_dep_wan:>16,.2f} 万元")
     dw_diff = abs(irp_dw_adj_wan - dw_dep_wan)
-    dw_ok = dw_diff == 0  # 万元级比较，无容差
+    dw_ok = dw_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.01 元
 
     msgs.append("")
-    msgs.append(f"  个人存款: {'✓ 一致' if gr_ok else '✗ 不一致'} (差额 {gr_diff:,.0f} 万元)")
-    msgs.append(f"  单位存款: {'✓ 一致' if dw_ok else '✗ 不一致'} (差额 {dw_diff:,.0f} 万元)")
+    msgs.append(f"  个人存款: {'✓ 一致' if gr_ok else '✗ 不一致'} (差额 {gr_diff * 10000:,.2f} 元，容差 {tol_yuan} 元)")
+    msgs.append(f"  单位存款: {'✓ 一致' if dw_ok else '✗ 不一致'} (差额 {dw_diff * 10000:,.2f} 元，容差 {tol_yuan} 元)")
     if gr_ok and dw_ok:
         msgs.append("\n>>> 存款归属表校验结果: 全部通过")
     else:
