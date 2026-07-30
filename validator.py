@@ -24,8 +24,8 @@
 
 核心校验逻辑：
   - 每一组比较都采用"一致→输出0，不一致→输出差额"的格式
-  - 存款归属表 vs IRP001：不考虑误差，差额不为 0 即为不一致（直接标红）
-  - 其他比较允许 ±max(1, 0.1%) 的容差范围
+  - 三组交叉校验（存款归属/科目余额核对表/IRP002 vs IRP001）
+    均采用绝对容差 0.001 元（严格一致，仅消除浮点精度尾差）
   - 校验报告用红色底色高亮不一致的单元格
 
 调整值说明：
@@ -397,7 +397,7 @@ def validate_irp002(filepath, irp001_path=None):
             val_irp002 = _get_cell_val(ws, r2, c2)
             val_irp001 = _get_cell_val(ws_irp, r1, c1)
             diff = abs(val_irp002 - val_irp001)
-            ok = diff <= max(1, abs(val_irp001 * 0.001))
+            ok = diff <= 0.001  # 绝对容差 0.001 元（严格一致）
             status = "OK" if ok else "ERROR"
             if not ok:
                 cross_ok = False
@@ -432,7 +432,7 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
       1. 从存款归属表读取"计算行"的个人存款和单位存款金额（万元）
       2. 从 IRP001 读取个人存款本金和单位存款本金（元）
       3. IRP001 数据扣除久悬户余额 → 除以10000 → 精确至万元
-      4. 与存款归属表的金额比较，绝对容差 0.01 元
+      4. 与存款归属表的金额比较，绝对容差 0.001 元
          （仅消除浮点精度尾差，确保数据准确无误）
 
     参数:
@@ -491,11 +491,11 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     irp_gr_adj_wan = round(irp_gr_adj_yuan / 10000)
     irp_dw_adj_wan = round(irp_dw_adj_yuan / 10000)
 
-    # 绝对容差 0.01 元（仅消除浮点精度尾差，实际要求严格一致）
-    tol_yuan = 0.01
+    # 绝对容差 0.001 元（仅消除浮点精度尾差，实际要求严格一致）
+    tol_yuan = 0.001
 
     msgs.append("========== 存款归属表 vs IRP001 校验 ==========")
-    msgs.append("校验逻辑: (IRP001本金 - 久悬户余额) / 10000 → 精确至万元 → 与存款归属表比较（绝对容差 0.01 元）")
+    msgs.append("校验逻辑: (IRP001本金 - 久悬户余额) / 10000 → 精确至万元 → 与存款归属表比较（绝对容差 0.001 元）")
 
     msgs.append("")
     msgs.append("--- 个人存款 ---")
@@ -505,7 +505,7 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     msgs.append(f"  精确至万元:                               {irp_gr_adj_wan:>16,.0f} 万元")
     msgs.append(f"  存款归属表 个人存款 (第{gr_row}行):           {gr_dep_wan:>16,.2f} 万元")
     gr_diff = abs(irp_gr_adj_wan - gr_dep_wan)
-    gr_ok = gr_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.01 元
+    gr_ok = gr_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.001 元
 
     msgs.append("")
     msgs.append("--- 单位存款 ---")
@@ -515,7 +515,7 @@ def validate_deposit_vs_irp001(deposit_path, irp001_path, c3=0, c4=0):
     msgs.append(f"  精确至万元:                               {irp_dw_adj_wan:>16,.0f} 万元")
     msgs.append(f"  存款归属表 单位存款 (第{dw_row}行):           {dw_dep_wan:>16,.2f} 万元")
     dw_diff = abs(irp_dw_adj_wan - dw_dep_wan)
-    dw_ok = dw_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.01 元
+    dw_ok = dw_diff * 10000 <= tol_yuan  # 万元差额换算为元，绝对容差 0.001 元
 
     msgs.append("")
     msgs.append(f"  个人存款: {'✓ 一致' if gr_ok else '✗ 不一致'} (差额 {gr_diff * 10000:,.2f} 元，容差 {tol_yuan} 元)")
@@ -609,7 +609,7 @@ def validate_acct_vs_irp001(checktable_path, irp001_path, c1=0, c2=0):
           个人存款 = 明细合计 + c1（本金）+ c2（利息）
           单位存款 = 明细合计 - c1（本金）- c2（利息）
       3. 与 IRP001 中对应项目的本金和利息比较
-      4. 容差范围：≤1元
+      4. 容差范围：≤0.001 元（严格一致，仅消除浮点尾差）
 
     参数:
         checktable_path (str): 科目余额核对表_已生成.xlsx 路径
@@ -747,8 +747,8 @@ def validate_acct_vs_irp001(checktable_path, irp001_path, c1=0, c2=0):
     irp_row_info = f"(IRP001第{irp_gr_row}行)" if irp_gr_row else ""
     msgs.append(f"  IRP001 个人存款本金 {irp_row_info}: {irp_gr_p:>16,.2f}")
     gr_p_diff = abs(gr_adjusted_p - irp_gr_p)
-    gr_p_ok = gr_p_diff <= 1
-    msgs.append(f"  校验: {'一致 (差额 %.2f)' % gr_p_diff if gr_p_ok else '不一致 (差额 %.2f 元)' % gr_p_diff}")
+    gr_p_ok = gr_p_diff <= 0.001
+    msgs.append(f"  校验: {'一致 (差额 %.4f)' % gr_p_diff if gr_p_ok else '不一致 (差额 %.4f 元)' % gr_p_diff}")
 
     msgs.append("")
     msgs.append("单位存款明细(科目余额核对表):")
@@ -761,8 +761,8 @@ def validate_acct_vs_irp001(checktable_path, irp001_path, c1=0, c2=0):
     irp_row_info = f"(IRP001第{irp_dw_row}行)" if irp_dw_row else ""
     msgs.append(f"  IRP001 单位存款本金 {irp_row_info}: {irp_dw_p:>16,.2f}")
     dw_p_diff = abs(dw_adjusted_p - irp_dw_p)
-    dw_p_ok = dw_p_diff <= 1
-    msgs.append(f"  校验: {'一致 (差额 %.2f)' % dw_p_diff if dw_p_ok else '不一致 (差额 %.2f 元)' % dw_p_diff}")
+    dw_p_ok = dw_p_diff <= 0.001
+    msgs.append(f"  校验: {'一致 (差额 %.4f)' % dw_p_diff if dw_p_ok else '不一致 (差额 %.4f 元)' % dw_p_diff}")
 
     # --- 利息校验 ---
     msgs.append("")
@@ -776,8 +776,8 @@ def validate_acct_vs_irp001(checktable_path, irp001_path, c1=0, c2=0):
     msgs.append(f"  调整后:                       {gr_adjusted_i:>16,.2f}")
     msgs.append(f"  IRP001 个人存款应付利息:      {irp_gr_i:>16,.2f}")
     gr_i_diff = abs(gr_adjusted_i - irp_gr_i)
-    gr_i_ok = gr_i_diff <= 1
-    msgs.append(f"  校验: {'一致 (差额 %.2f)' % gr_i_diff if gr_i_ok else '不一致 (差额 %.2f 元)' % gr_i_diff}")
+    gr_i_ok = gr_i_diff <= 0.001
+    msgs.append(f"  校验: {'一致 (差额 %.4f)' % gr_i_diff if gr_i_ok else '不一致 (差额 %.4f 元)' % gr_i_diff}")
 
     msgs.append("")
     msgs.append("单位存款利息明细(科目余额核对表):")
@@ -789,8 +789,8 @@ def validate_acct_vs_irp001(checktable_path, irp001_path, c1=0, c2=0):
     msgs.append(f"  调整后:                       {dw_adjusted_i:>16,.2f}")
     msgs.append(f"  IRP001 单位存款应付利息:      {irp_dw_i:>16,.2f}")
     dw_i_diff = abs(dw_adjusted_i - irp_dw_i)
-    dw_i_ok = dw_i_diff <= 1
-    msgs.append(f"  校验: {'一致 (差额 %.2f)' % dw_i_diff if dw_i_ok else '不一致 (差额 %.2f 元)' % dw_i_diff}")
+    dw_i_ok = dw_i_diff <= 0.001
+    msgs.append(f"  校验: {'一致 (差额 %.4f)' % dw_i_diff if dw_i_ok else '不一致 (差额 %.4f 元)' % dw_i_diff}")
 
     all_ok = gr_p_ok and dw_p_ok and gr_i_ok and dw_i_ok
     if all_ok:
@@ -1162,17 +1162,16 @@ def _diff_ok(v1, v2):
     """
     判断两个值是否在容差范围内一致。
 
-    容差规则：允许差额 ≤ max(1, abs(v2 * 0.001))
-    即至少允许 1 元的绝对误差，同时允许 0.1% 的相对误差。
+    容差规则：绝对容差 0.001 元（严格一致，仅消除浮点精度尾差）。
 
     参数:
         v1 (float): 值1
-        v2 (float): 值2（作为基准值）
+        v2 (float): 值2
 
     返回:
         bool: True 表示在容差范围内一致
     """
-    return abs(v1 - v2) <= max(1, abs(v2 * 0.001))
+    return abs(v1 - v2) <= 0.001
 
 
 def _write_cell(ws, row, col, value, is_error=False, number_fmt=None,
@@ -1369,7 +1368,7 @@ def generate_validation_report(irp001_path, output_path,
                     adj_note = f"（已扣除单位久悬户 c4={adj_c4:,.2f}）"
                 irp_in_wan = round(irp001_principal / 10000)
                 diff_wan = dep_val_wan - irp_in_wan
-                is_err = diff_wan != 0  # 无容差，差额不为0即标红
+                is_err = abs(diff_wan) * 10000 > 0.001  # 绝对容差 0.001 元，超出即标红
                 if is_err:
                     error_count += 1
                     error_items.append(
@@ -1429,7 +1428,7 @@ def generate_validation_report(irp001_path, output_path,
                         adjusted_val = acct_val - adj_p - adj_i
                         adj_note = f"（-c1-c2 {adj_p + adj_i:,.2f}）"
                 is_err = not _diff_ok(adjusted_val, irp001_val)
-                tolerance = max(1, abs(irp001_val * 0.001))
+                tolerance = 0.001
                 if is_err:
                     error_count += 1
                     error_items.append(
@@ -1441,7 +1440,7 @@ def generate_validation_report(irp001_path, output_path,
                 msgs.append(
                     f"  {col_letter}列 核对表{field_name} vs IRP001: 核对表={acct_val:,.2f}{adj_note}  "
                     f"IRP001={irp001_val:,.2f}  差额={adjusted_val - irp001_val:,.2f}  "
-                    f"容差=±{tolerance:,.2f}  [{'ERROR' if is_err else 'OK'}]")
+                    f"容差=±{tolerance:g}元  [{'ERROR' if is_err else 'OK'}]")
             else:
                 _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
 
@@ -1473,7 +1472,7 @@ def generate_validation_report(irp001_path, output_path,
                 if field == 'total' and irp001_val == 0 and irp001_data:
                     irp001_val = irp001_data.get('principal', 0)
                 is_err = not _diff_ok(irp002_val, irp001_val)
-                tolerance = max(1, abs(irp001_val * 0.001))
+                tolerance = 0.001
                 if is_err:
                     error_count += 1
                     error_items.append(
@@ -1485,7 +1484,7 @@ def generate_validation_report(irp001_path, output_path,
                 msgs.append(
                     f"  {col_letter}列 IRP002{field_name} vs IRP001: IRP002={irp002_val:,.2f}  "
                     f"IRP001={irp001_val:,.2f}  差额={irp002_val - irp001_val:,.2f}  "
-                    f"容差=±{tolerance:,.2f}  [{'ERROR' if is_err else 'OK'}]")
+                    f"容差=±{tolerance:g}元  [{'ERROR' if is_err else 'OK'}]")
             else:
                 _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
 
@@ -1494,9 +1493,9 @@ def generate_validation_report(irp001_path, output_path,
     ws.merge_cells(f'A{note_row}:H{note_row}')
     _write_cell(ws, note_row, 1,
                 '说明：灰色(/)部分不校验。红色底色单元格表示核对有误。'
-                'B~E列：0=一致，非零值为差额（元）。'
-                'B列（存款归属表核对）无容差，差额不为0即标红；'
-                'C~E列差额容差 ±max(1, 0.1%)。',
+                'B~H列：0=一致，非零值为差额（元）。'
+                '三组核对（存款归属表/科目余额核对表/IRP002 vs IRP001）'
+                '均采用绝对容差 0.001 元，超出即标红。',
                 number_fmt=None,
                 font=Font(name='微软雅黑', size=9, italic=True, color="666666"),
                 alignment=Alignment(horizontal='left', vertical='center'))
