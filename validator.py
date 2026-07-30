@@ -1250,23 +1250,39 @@ def generate_validation_report(irp001_path, output_path,
     adj_c4 = to_float(c4)   # 单位久悬户余额（元）
 
     # ---- 读取各数据源 ----
+    msgs.append("========== 校验参数 ==========")
+    msgs.append(f"  c1 个体工商户本金调整值: {adj_p:,.2f} 元")
+    msgs.append(f"  c2 个体工商户利息调整值: {adj_i:,.2f} 元")
+    msgs.append(f"  c3 个人久悬户余额:       {adj_c3:,.2f} 元")
+    msgs.append(f"  c4 单位久悬户余额:       {adj_c4:,.2f} 元")
+    msgs.append("")
+    msgs.append("========== 数据源读取 ==========")
+
     irp001 = _read_irp001_map(irp001_path)
-    msgs.append(f"IRP001: {len(irp001)} 个项目")
+    msgs.append(f"  IRP001: 读取 {len(irp001)} 个项目（基准数据源）")
 
     irp002 = {}
     if irp002_path and os.path.exists(str(irp002_path)):
         irp002 = _read_irp002_map(irp002_path)
-        msgs.append(f"IRP002: {len(irp002)} 个项目")
+        msgs.append(f"  IRP002: 读取 {len(irp002)} 个项目")
+    else:
+        msgs.append("  IRP002: 未提供，跳过 IRP002 相关列（F/G/H）校验")
 
     deposit = {}
     if deposit_path and os.path.exists(str(deposit_path)):
         deposit = _read_deposit_map(deposit_path)
-        msgs.append(f"存款归属表: {len(deposit)} 个计算行")
+        msgs.append(f"  存款归属表: 读取 {len(deposit)} 个计算行")
+    else:
+        msgs.append("  存款归属表: 未提供，跳过 B 列校验")
 
     acct = {}
     if acct_check_path and os.path.exists(str(acct_check_path)):
         acct = _read_acct_check_map(acct_check_path)
-        msgs.append(f"科目余额核对表: {len(acct)} 个汇总项")
+        msgs.append(f"  科目余额核对表: 读取 {len(acct)} 个汇总项")
+    else:
+        msgs.append("  科目余额核对表: 未提供，跳过 C/D/E 列校验")
+    msgs.append("")
+    msgs.append("========== 逐项校验明细 ==========")
 
     # ---- 构建输出工作簿 ----
     wb = openpyxl.Workbook()
@@ -1315,9 +1331,19 @@ def generate_validation_report(irp001_path, output_path,
 
     # ---- 逐项填充数据 ----
     error_count = 0
+    error_items = []   # 差异项明细，用于末尾汇总
     for item in _VALIDATION_ITEMS:
         excel_row, label, irp001_key, dep_key, acct_key, irp002_key, skip_cols = item
         irp001_data = irp001.get(irp001_key, {})
+
+        msgs.append(f"--- 第{excel_row}行「{label}」---")
+        if not irp001_data:
+            msgs.append(f"  WARNING: IRP001 中未找到「{irp001_key}」对应数据，基准值按 0 处理")
+        else:
+            msgs.append(
+                f"  IRP001基准: 本金={irp001_data.get('principal', 0):,.2f}  "
+                f"利息={irp001_data.get('interest', 0):,.2f}  "
+                f"本息合计={irp001_data.get('total', 0):,.2f}")
 
         # A列：项目名称
         _write_cell(ws, excel_row, 1, label, number_fmt=None,
@@ -1330,19 +1356,31 @@ def generate_validation_report(irp001_path, output_path,
             if dep_val_wan is not None:
                 irp001_principal = irp001_data.get('principal', 0)
                 # 应用久悬户余额调整
+                adj_note = ""
                 if label == '（一）个人存款':
                     irp001_principal -= adj_c3
+                    adj_note = f"（已扣除个人久悬户 c3={adj_c3:,.2f}）"
                 elif label == '（二）单位存款':
                     irp001_principal -= adj_c4
+                    adj_note = f"（已扣除单位久悬户 c4={adj_c4:,.2f}）"
                 irp_in_wan = round(irp001_principal / 10000)
                 diff_wan = dep_val_wan - irp_in_wan
                 is_err = diff_wan != 0  # 无容差，差额不为0即标红
                 if is_err:
                     error_count += 1
+                    error_items.append(
+                        f"第{excel_row}行「{label}」B列: 存款归属表={dep_val_wan:,.2f}万元 vs "
+                        f"IRP001={irp_in_wan:,.0f}万元，差额={diff_wan:,.2f}万元")
                 result = 0 if not is_err else diff_wan * 10000
                 _write_cell(ws, excel_row, 2, result, is_error=is_err)
+                msgs.append(
+                    f"  B列 存款归属表 vs IRP001: 归属表={dep_val_wan:,.2f}万元  "
+                    f"IRP001调整后={irp_in_wan:,.0f}万元{adj_note}  "
+                    f"差额={diff_wan:,.2f}万元  [{'ERROR' if is_err else 'OK'}]")
             else:
                 _write_cell(ws, excel_row, 2, None, number_fmt=None)
+                if dep_key and deposit:
+                    msgs.append(f"  B列: 存款归属表中未找到「{dep_key}」，留空")
         else:
             _write_cell(ws, excel_row, 2, '/', number_fmt=None,
                         fill=GRAY_FILL, font=NORMAL_FONT_V,
@@ -1350,6 +1388,8 @@ def generate_validation_report(irp001_path, output_path,
 
         # ---- C/D/E列：科目余额核对表 vs IRP001 ----
         acct_data = acct.get(acct_key) if acct_key else None
+        if acct_key and acct_data is None and acct:
+            msgs.append(f"  C/D/E列: 科目余额核对表中未找到「{acct_key}」，留空")
         for col_offset, field, col_letter in [
             (3, 'principal', 'C'), (4, 'interest', 'D'), (5, 'total', 'E')
         ]:
@@ -1363,30 +1403,48 @@ def generate_validation_report(irp001_path, output_path,
             irp001_val = irp001_data.get(field, 0) if irp001_data else 0
             if acct_val is not None:
                 adjusted_val = acct_val
+                adj_note = ""
                 if label == '（一）个人存款':
                     if field == 'principal':
                         adjusted_val = acct_val + adj_p
+                        adj_note = f"（+c1 {adj_p:,.2f}）"
                     elif field == 'interest':
                         adjusted_val = acct_val + adj_i
+                        adj_note = f"（+c2 {adj_i:,.2f}）"
                     elif field == 'total':
                         adjusted_val = acct_val + adj_p + adj_i
+                        adj_note = f"（+c1+c2 {adj_p + adj_i:,.2f}）"
                 elif label == '（二）单位存款':
                     if field == 'principal':
                         adjusted_val = acct_val - adj_p
+                        adj_note = f"（-c1 {adj_p:,.2f}）"
                     elif field == 'interest':
                         adjusted_val = acct_val - adj_i
+                        adj_note = f"（-c2 {adj_i:,.2f}）"
                     elif field == 'total':
                         adjusted_val = acct_val - adj_p - adj_i
+                        adj_note = f"（-c1-c2 {adj_p + adj_i:,.2f}）"
                 is_err = not _diff_ok(adjusted_val, irp001_val)
+                tolerance = max(1, abs(irp001_val * 0.001))
                 if is_err:
                     error_count += 1
+                    error_items.append(
+                        f"第{excel_row}行「{label}」{col_letter}列: 核对表调整后={adjusted_val:,.2f} vs "
+                        f"IRP001={irp001_val:,.2f}，差额={adjusted_val - irp001_val:,.2f}元")
                 result = 0 if not is_err else (adjusted_val - irp001_val)
                 _write_cell(ws, excel_row, col_offset, result, is_error=is_err)
+                field_name = {'principal': '本金', 'interest': '利息', 'total': '本息合计'}[field]
+                msgs.append(
+                    f"  {col_letter}列 核对表{field_name} vs IRP001: 核对表={acct_val:,.2f}{adj_note}  "
+                    f"IRP001={irp001_val:,.2f}  差额={adjusted_val - irp001_val:,.2f}  "
+                    f"容差=±{tolerance:,.2f}  [{'ERROR' if is_err else 'OK'}]")
             else:
                 _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
 
         # ---- F/G/H列：IRP002 vs IRP001 ----
         irp002_data = irp002.get(irp002_key) if irp002_key else None
+        if irp002_key and irp002_data is None and irp002:
+            msgs.append(f"  F/G/H列: IRP002 中未找到「{irp002_key}」，留空")
         for col_offset, field, col_letter in [
             (6, 'principal', 'F'), (7, 'interest', 'G'), (8, 'total', 'H')
         ]:
@@ -1411,10 +1469,19 @@ def generate_validation_report(irp001_path, output_path,
                 if field == 'total' and irp001_val == 0 and irp001_data:
                     irp001_val = irp001_data.get('principal', 0)
                 is_err = not _diff_ok(irp002_val, irp001_val)
+                tolerance = max(1, abs(irp001_val * 0.001))
                 if is_err:
                     error_count += 1
+                    error_items.append(
+                        f"第{excel_row}行「{label}」{col_letter}列: IRP002={irp002_val:,.2f} vs "
+                        f"IRP001={irp001_val:,.2f}，差额={irp002_val - irp001_val:,.2f}元")
                 result = 0 if not is_err else (irp002_val - irp001_val)
                 _write_cell(ws, excel_row, col_offset, result, is_error=is_err)
+                field_name = {'principal': '本金', 'interest': '利息', 'total': '本息合计'}[field]
+                msgs.append(
+                    f"  {col_letter}列 IRP002{field_name} vs IRP001: IRP002={irp002_val:,.2f}  "
+                    f"IRP001={irp001_val:,.2f}  差额={irp002_val - irp001_val:,.2f}  "
+                    f"容差=±{tolerance:,.2f}  [{'ERROR' if is_err else 'OK'}]")
             else:
                 _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
 
@@ -1444,9 +1511,14 @@ def generate_validation_report(irp001_path, output_path,
     wb.save(str(output_path))
     wb.close()
 
-    msgs.append(f"\n校验报告已生成: {output_path}")
+    msgs.append("")
+    msgs.append("========== 校验结果汇总 ==========")
+    msgs.append(f"校验报告已生成: {output_path}")
     msgs.append(f"共校验 {len(_VALIDATION_ITEMS)} 个项目，发现 {error_count} 处差异")
     if error_count > 0:
+        msgs.append("差异项明细:")
+        for ei in error_items:
+            msgs.append(f"  ✗ {ei}")
         msgs.append(">>> 请检查标红单元格对应的数据来源")
     else:
         msgs.append(">>> 所有校验项一致 ✓")
