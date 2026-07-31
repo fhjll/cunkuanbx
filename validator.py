@@ -1366,6 +1366,9 @@ def generate_validation_report(irp001_path, output_path,
                 elif label == '（二）单位存款':
                     irp001_principal -= adj_c4
                     adj_note = f"（已扣除单位久悬户 c4={adj_c4:,.2f}）"
+                elif label == '一、境内存款':
+                    irp001_principal -= (adj_c3 + adj_c4)
+                    adj_note = f"（已扣除久悬户 c3+c4={adj_c3 + adj_c4:,.2f}）"
                 irp_in_wan = round(irp001_principal / 10000)
                 diff_wan = dep_val_wan - irp_in_wan
                 is_err = abs(diff_wan) * 10000 > 0.001  # 绝对容差 0.001 元，超出即标红
