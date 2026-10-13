@@ -3,13 +3,12 @@ name: Build Linux (麒麟/统信UOS) 程序
 # 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序。
 # 设计要点：
 #   - PyInstaller 不能跨平台/跨架构编译，必须在 Linux 上构建；
-#   - 构建放在 manylinux2014 官方镜像里进行（glibc 2.17），
-#     产物对麒麟 V10 各版本、统信 UOS、Debian/RHEL 系都能直接运行；
-#   - 容器里只装 Python/PyQt5/PyInstaller（自带编译工具与 pip，
-#     不依赖发行版 apt 源），先由宿主 runner 检出代码，再 docker run 构建；
-#   - 产物先在容器内用 ASCII 名生成，回到宿主后再改名为中文，避免
-#     容器内 C 区域设置下的编码问题。
-#   - aarch64（飞腾/鲲鹏）版本用 arm64 运行器 + manylinux2014_aarch64，手动触发。
+#   - 构建放在 manylinux2014 官方镜像里进行（glibc 2.17），产物对
+#     麒麟 V10 各版本、统信 UOS、Debian/RHEL 系都能直接运行；
+#   - 容器里的 Python 用绝对路径调用（镜像自带 /opt/python/*），不依赖 PATH；
+#   - 产物先在容器内用 ASCII 名生成，回到宿主后再改名为中文；
+#   - 构建失败时把最后 30 行日志以 ::error:: 注解输出（便于在 Actions 页面
+#     与 API 上直接看到失败原因）。
 
 on:
   push:
@@ -39,15 +38,22 @@ jobs:
 
       - name: Build in manylinux2014 container (glibc 2.17)
         run: |
+          set -o pipefail
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_x86_64 bash -euxc '
-              PATH=/opt/python/cp38-cp38/bin:$PATH
-              pip install --upgrade "pip<24" wheel setuptools
-              pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
-              pyinstaller --onefile --noconfirm --name app \
+              PYBIN=$(ls -d /opt/python/cp3[89]-cp3[89]*/bin /opt/python/cp31[0-2]-cp31[0-2]*/bin 2>/dev/null | head -1)
+              echo "使用 Python: $PYBIN"
+              "$PYBIN/pip" install --upgrade pip wheel setuptools
+              "$PYBIN/pip" install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
-            '
+            ' 2>&1 | tee build-linux.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Linux构建失败::$(tail -30 build-linux.log | tr '\n' '|' | sed 's/%/%25/g')"
+            exit "$rc"
+          fi
           mv dist/app "dist/存保审核工具"
 
       - name: Compatibility info
@@ -61,6 +67,14 @@ jobs:
           name: 存保审核工具-linux-x64
           path: dist/存保审核工具
 
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-log
+          path: build-linux.log
+          if-no-files-found: ignore
+
   build-linux-arm64:
     # 银河麒麟跑在飞腾/鲲鹏等 ARM64 平台时使用（需仓库可用 arm64 运行器）
     if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.arch == 'arm64' || github.event.inputs.arch == 'both') }}
@@ -70,15 +84,22 @@ jobs:
 
       - name: Build in manylinux2014_aarch64 container
         run: |
+          set -o pipefail
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_aarch64 bash -euxc '
-              PATH=/opt/python/cp38-cp38/bin:$PATH
-              pip install --upgrade "pip<24" wheel setuptools
-              pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
-              pyinstaller --onefile --noconfirm --name app \
+              PYBIN=$(ls -d /opt/python/cp3[89]-cp3[89]*/bin /opt/python/cp31[0-2]-cp31[0-2]*/bin 2>/dev/null | head -1)
+              echo "使用 Python: $PYBIN"
+              "$PYBIN/pip" install --upgrade pip wheel setuptools
+              "$PYBIN/pip" install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
-            '
+            ' 2>&1 | tee build-linux.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Linux(arm64)构建失败::$(tail -30 build-linux.log | tr '\n' '|' | sed 's/%/%25/g')"
+            exit "$rc"
+          fi
           mv dist/app "dist/存保审核工具"
 
       - name: Upload artifact

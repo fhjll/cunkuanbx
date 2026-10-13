@@ -1592,11 +1592,9 @@ class MainWindow(QMainWindow):
         irp002_path = self._get_path('irp002')
         base_path = self._get_path('base_out')
 
+        # 说明：报告模板若含 IRP002 列才会用到 IRP002，故不再强制要求该文件
         if not irp002_path or not os.path.exists(irp002_path):
-            QMessageBox.warning(self, "缺少必要文件",
-                "未找到 IRP002 申报表，无法进行 IRP002 交叉校验。\n"
-                "请将 IRP002 文件放入工作目录。")
-            return
+            self._log("[提示] 未找到 IRP002 申报表，报告中的 IRP002 列将填“无对应数据”")
 
         output_path = os.path.join(folder, "校验报告.xlsx")
         adjustments = self._get_adjustments()
@@ -1605,9 +1603,9 @@ class MainWindow(QMainWindow):
         self.btn_report.setEnabled(False)
         self.prog_bar.setVisible(True)
         self.log_view.clear()
-        self._log(">>> 开始生成全面校验报告")
+        self._log(">>> 开始生成全面校验报告（《校验表（新）》格式）")
         self._log(f"IRP001: {irp001_path}")
-        self._log(f"IRP002: {irp002_path}")
+        self._log(f"IRP002: {irp002_path or '（未提供）'}")
         self._log(f"保费基数核对表: {base_path}")
         self._log(f"调整项: {len(adjustments)} 项")
         self._log(f"输出: {output_path}")

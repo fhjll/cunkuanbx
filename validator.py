@@ -53,6 +53,8 @@ from common import to_float, excel_round, ExcelSheet as _ExcelSheet
 from base_checker import (ADJ_SCOPE_ACCT, ADJ_SCOPE_DEP,
                           adjustment_row_values, describe_adjustments,
                           normalize_adjustments, summarize_adjustments)
+from bank_config import resolve_template
+from account_checker import _resolve_merged
 
 
 # ============================================================
@@ -367,6 +369,11 @@ def _read_base_check_map(filepath):
 
     section = '境内'
     acct_p = acct_i = 0.0    # 会计科目 境内存款累计（个人+单位+财政性+非存款类）
+    def cell_num(row, col):
+        """取值：空单元格返回 None（用于区分"无数据"与"数值 0"）"""
+        v = ws.cell(row, col).value
+        return float(v) if isinstance(v, (int, float)) else None
+
     for r in range(1, ws.max_row + 1):
         b_name = str(ws.cell(r, 2).value or '').strip()
         d_name = str(ws.cell(r, 4).value or '').strip()
@@ -381,7 +388,8 @@ def _read_base_check_map(filepath):
         # ---- 存款归属核对（F 列，万元）----
         label = _deposit_label(section, b_name, d_name)
         if label:
-            out['deposit'][label] = to_float(ws.cell(r, 6).value)
+            f_val = ws.cell(r, 6).value
+            out['deposit'][label] = float(f_val) if isinstance(f_val, (int, float)) else None
             out['rows'].setdefault(label, r)
 
         # ---- 表内"调整项"行（本金在 I 列、利息在 L 列）----
@@ -832,127 +840,142 @@ def _read_irp002_map(filepath):
 
 
 # ============================================================
-# 校验表行定义
+# 校验报告（基于《校验表（新）》模板，文本式结论）
 # ============================================================
 
-# 每条记录格式：
-# (excel_row_1based, item_label, irp001_key, deposit_key, acct_key, irp002_key, skip_cols)
-# skip_cols: {'B', 'C', 'D', 'E', 'F', 'G', 'H'} — 标记 '/' 的列（不校验）
-_VALIDATION_ITEMS = [
-    # row  项目名称                        IRP001关键词          存款归属表关键词       科目核对表关键词         IRP002关键词          跳过列
-    (4,  '一、境内存款',                  '一、境内存款',         '一、境内存款',       '一、境内存款',           '一、境内存款',            set()),
-    (5,  '（一）个人存款',                '（一）个人存款',       '（一）个人存款',     '（一）个人存款',          '（一）个人存款',          set()),
-    (6,  '（二）单位存款',                '（二）单位存款',       '（二）单位存款',     '（二）单位存款',          '（二）单位存款',          set()),
-    (7,  '住房公积金存款',                '住房公积金存款',       '住房公积金存款',     '住房公积金存款',          '住房公积金存款',          set()),
-    (8,  '社保基金存款',                  '社保基金存款',         '社保基金存款',       '社保基金存款',            '社保基金存款',            set()),
-    (9,  '（三）财政性存款',              '（三）财政性存款',     '（三）财政性存款',    '（三）财政性存款',        '（三）财政性存款',        set()),
-    (10, '1.国库定期存款',                '1.国库定期存款',       '1.国库定期存款',     '1.国库定期存款',          None,                      set()),
-    (11, '2.代理财政性存款',              '2.代理财政性存款',     '2.代理财政性存款',    '2.代理财政性存款',        None,                      set()),
-    (12, '（四）非存款类金融机构存款',    '（四）非存款类金融机构存款', '（四）非存款类金融机构存款', '（四）非存款类金融机构存款', '（四）非存款类金融机构存款', set()),
-    (13, '二、境外存款',                  '二、境外存款',         None,                 '二、境外存款',            '二、境外存款',            set()),
-    (14, '境外个人存款',                  '境外个人存款',         '境外（一）个人存款', None,                      '境外个人存款',            {'C','D','E'}),
-    (15, '境外单位存款',                  '境外单位存款',         '境外（二）单位存款', None,                      '境外单位存款',            {'C','D','E'}),
-    (16, '（三）境外同业存放',            '（三）境外同业存放',    '境外（三）境外同业存放', '（三）境外同业存放',    '（三）境外同业存放',      set()),
-    (17, '高级管理人员',                  '高级管理人员',         None,                 '高级管理人员',            '高级管理人员',            {'B'}),
-    (18, '被保险存款余额',                '被保险存款余额',       None,                 '被保险存款余额',           '被保险存款余额',          {'B'}),
-    (19, '受保存款',                      '受保存款',             None,                 None,                      '受保存款',                {'B','C'}),
-    (20, '被保险存款客户数',              '被保险存款客户数',     None,                 None,                      '被保险存款客户数',        {'B','C'}),
-    (21, '最高偿付限额以内客户数',         '最高偿付限额以内客户数', None,                None,                      '最高偿付限额以内客户数',  {'B','C'}),
-]
+# 校验报告模板（相对路径；支持 工作目录/模板 → 程序目录 → 内置 三级查找）
+REPORT_TEMPLATE_REL = 'templates/校验表（新）.xlsx'
 
+# 报告填写约定
+NO_DATA_TEXT = '无对应数据'      # 没有数据的单元格
+MATCH_TEXT = '核对一致'          # 核对一致
 
-# ============================================================
-# 辅助函数：单元格写入和比较
-# ============================================================
-
-def _col_letter(idx):
-    """0-indexed 列索引 → Excel 列字母（A-H）"""
-    return chr(ord('A') + idx)
-
-
-def _skip_check(skip_set, col_letter_str):
-    """检查某列是否被标记为跳过（不校验）"""
-    return col_letter_str in skip_set
-
+# 「匹配一致」的容差
+TOL_YUAN = 0.001                 # 元级比较（会计科目 vs IRP001、IRP002 vs IRP001）
+TOL_WAN = 0.001                  # 万元级比较（存款归属 vs 会计科目/IRP001）
 
 def _diff_ok(v1, v2):
     """
-    判断两个值是否在容差范围内一致。
-
-    容差规则：绝对容差 0.001 元（严格一致，仅消除浮点精度尾差）。
+    判断两个数值是否在容差内一致（元级，绝对容差 0.001 元）。
 
     参数:
         v1 (float): 值1
         v2 (float): 值2
 
     返回:
-        bool: True 表示在容差范围内一致
+        bool: True 表示一致
     """
-    return abs(v1 - v2) <= 0.001
+    return abs(to_float(v1) - to_float(v2)) <= TOL_YUAN
 
 
-def _write_cell(ws, row, col, value, is_error=False, number_fmt=None,
-                font=None, fill=None, alignment=None, border=None):
+# 模板行项目 → 各数据源标签（按模板 A 列关键词匹配；§境外 表示境外章节内同名行）
+# (A列关键词, 存款归属标签, 会计科目标签, IRP001标签, IRP002标签, 是否境外行)
+_REPORT_ITEMS = [
+    ('一、境内存款',               '一、境内存款', '一、境内存款', '一、境内存款', '一、境内存款', False),
+    ('（一）个人存款',             '（一）个人存款', '（一）个人存款', '（一）个人存款', '（一）个人存款', False),
+    ('（二）单位存款',             '（二）单位存款', '（二）单位存款', '（二）单位存款', '（二）单位存款', False),
+    ('住房公积金',                 '住房公积金存款', None, '住房公积金存款', '住房公积金存款', False),
+    ('社保基金存款',               '社保基金存款', None, '社保基金存款', '社保基金存款', False),
+    ('（三）财政性存款',           '（三）财政性存款', '（三）财政性存款', '（三）财政性存款', '（三）财政性存款', False),
+    ('1.国库定期存款',             '1.国库定期存款', '1.国库定期存款', '1.国库定期存款', None, False),
+    ('2.代理财政性存款',           '2.代理财政性存款', '2.代理财政性存款', '2.代理财政性存款', None, False),
+    ('（四）非存款类金融机构存款', '（四）非存款类金融机构存款', '（四）非存款类金融机构存款',
+                                   '（四）非存款类金融机构存款', '（四）非存款类金融机构存款', False),
+    ('二、境外存款',               '二、境外存款', None, '二、境外存款', '二、境外存款', False),
+    ('（一）个人存款',             '境外（一）个人存款', None, '境外个人存款', '境外个人存款', True),
+    ('（二）单位存款',             '境外（二）单位存款', None, '境外单位存款', '境外单位存款', True),
+    ('（三）境外同业存放',         '境外（三）境外同业存放', '（三）境外同业存放',
+                                   '（三）境外同业存放', '（三）境外同业存放', False),
+    ('三、高级管理人员',           None, '高级管理人员', '高级管理人员', '高级管理人员', False),
+    ('被保险存款',                 None, '被保险存款余额', '被保险存款余额', '被保险存款余额', False),
+    ('受保存款',                   None, None, '受保存款', '受保存款', False),
+    ('被保险存款客户数',           None, None, '被保险存款客户数', '被保险存款客户数', False),
+    ('最高偿付限额以内客户数',     None, None, '最高偿付限额以内客户数', '最高偿付限额以内客户数', False),
+]
+
+
+def _row_item_for_label(label, in_overseas):
     """
-    向工作表写入单元格，is_error 时自动应用红色样式。
-
-    is_error=True 时：
-      - 字体：红色加粗（#CC0000）
-      - 填充：红色底色（#FFC7CE）
+    按模板 A 列标签找到对应项目定义。
 
     参数:
-        ws: openpyxl Worksheet
-        row (int): 行号（1-indexed）
-        col (int): 列号（1-indexed）
-        value: 单元格值
-        is_error (bool): 是否为差异项（标红）
-        number_fmt (str, optional): 数字格式
-        font (Font, optional): 字体（is_error 时忽略）
-        fill (PatternFill, optional): 填充（is_error 时忽略）
-        alignment (Alignment, optional): 对齐方式
-        border (Border, optional): 边框
+        label (str): 模板 A 列的项目名称
+        in_overseas (bool): 当前是否处于"二、境外存款"章节内
+
+    返回:
+        tuple or None: 项目定义，未匹配返回 None
     """
-    _init_styles()
-    cell = ws.cell(row, col)
-    cell.value = value
-    cell.number_format = number_fmt or NUM_FMT_V
-    cell.font = RED_FONT_V if is_error else (font or NORMAL_FONT_V)
-    cell.fill = RED_FILL if is_error else (fill or PatternFill(fill_type=None))
-    cell.alignment = alignment or Alignment(horizontal='right', vertical='center')
-    cell.border = border or THIN_BORDER
+    if not label:
+        return None
+    hits = [it for it in _REPORT_ITEMS if it[0] in label]
+    # 长关键词优先（如"被保险存款客户数"优先于"被保险存款"）
+    for item in sorted(hits, key=lambda it: -len(it[0])):
+        if item[5] and not in_overseas:
+            continue          # 境外同名行只在境外章节内匹配
+        if not item[5] and item[0] in ('（一）个人存款', '（二）单位存款') and in_overseas:
+            continue          # 境内同名行不在境外章节内匹配
+        return item
+    return None
 
 
-# ============================================================
-# 核心函数：生成全面校验报告
-# ============================================================
+def _cmp_text(left_name, left_val, right_name, right_val, tol, unit='元'):
+    """
+    按报告约定的三种结论生成单元格文本。
+
+    返回:
+        tuple: (文本, 是否不一致)
+    """
+    if left_val is None or right_val is None:
+        return NO_DATA_TEXT, False
+    if abs(left_val - right_val) <= tol:
+        return MATCH_TEXT, False
+    return (f"{left_name} {left_val:,.2f} {unit} / "
+            f"{right_name} {right_val:,.2f} {unit}"), True
+
+
+def _resolve_report_template(base_check_path=None, template_path=None):
+    """
+    定位校验报告模板（支持工作目录/模板 覆盖，与核对表模板同一套查找规则）。
+
+    参数:
+        base_check_path (str, optional): 已生成的保费基数核对表路径（取其目录为工作目录）
+        template_path (str, optional): 直接指定模板路径
+
+    返回:
+        str: 模板文件路径
+    """
+    if template_path and os.path.exists(str(template_path)):
+        return str(template_path)
+    work_dir = os.path.dirname(os.path.abspath(str(base_check_path))) if base_check_path else None
+    path, _ = resolve_template(REPORT_TEMPLATE_REL, work_dir)
+    return path
+
 
 def generate_validation_report(irp001_path, output_path,
-                                irp002_path=None, base_check_path=None,
-                                adjustments=None, template_path=None):
+                               irp002_path=None, base_check_path=None,
+                               adjustments=None, template_path=None):
     """
-    基于校验表模板，生成全面校验报告（Excel 格式）。
+    按《校验表（新）》模板生成校验报告。
 
-    校验范围涵盖最多 3 个数据源的交叉比对：
-      - IRP001（基准数据源，必填）
-      - 保费基数核对表_已生成（可选，内含存款归属核对 + 会计科目核对）
-      - IRP002（可选）
+    表格结构（模板固定）：
+      A 列  = 项目名称
+      B 列  = 存款归属核对（本金，万元） 与 会计科目核对（本金，万元）的比较
+      C~E 列= 存款归属核对 与 IRP001（本金 / 利息 / 合计）的比较
+      F~H 列= 会计科目核对 与 IRP001（本金 / 利息 / 合计）的比较
+      （模板若另有 I~K 列（IRP002 块），则填 IRP002 与 IRP001 的比较）
 
-    报告格式：
-      - 标题行：存保申报数据校验表
-      - 分组表头：数据来源分组（存款归属核对、会计科目核对、IRP002）
-      - 数据行：每行一个校验项，输出 0（一致）或差额（不一致）
-      - 差异行自动标红（红色底色）
+    填写约定：
+      · 没有数据的单元格        → “无对应数据”
+      · 核对一致                → “核对一致”
+      · 核对不一致              → 把两个值都写出来（如 “存款归属 992,503.00 万元 / IRP001 992,532.00 万元”）
 
     参数:
-        irp001_path:     IRP001 申报表路径（必填，作为基准数据源）
+        irp001_path:     IRP001 申报表路径（基准数据源，必填）
         output_path:     输出 .xlsx 路径（必填）
         irp002_path:     IRP002 申报表路径（可选）
-        base_check_path: 保费基数核对表_已生成.xlsx 路径（可选）
-        adjustments:     调整项列表（可选，与生成核对表时一致）；
-                         "用途=会计科目核对"的调整项已含在核对表内，
-                         "用途=存款归属核对"的调整额用于从 IRP001 本金中扣减；
-                         不传时取核对表内 Q9/Q10
-        template_path:   （保留参数，暂未使用）
+        base_check_path: 保费基数核对表_已生成.xlsx 路径（可选，提供存款归属/会计科目数据）
+        adjustments:     调整项列表（可选；用于存款归属与 IRP001 的比较）
+        template_path:   校验报告模板路径（可选，默认模板内置/程序目录）
 
     返回:
         list[str]: 运行日志消息列表
@@ -960,277 +983,190 @@ def generate_validation_report(irp001_path, output_path,
     _init_styles()
     msgs = []
 
-    # 调整项：会计科目侧已含在核对表内；存款归属侧用于比较时调整 IRP001 本金
-    items = normalize_adjustments(adjustments) if adjustments else []
-    acct_adj, dep_adj = summarize_adjustments(items) if items else ({}, {})
-
     # ---- 读取各数据源 ----
-    msgs.append("========== 校验参数 ==========")
-    if items:
-        for scope in (ADJ_SCOPE_ACCT, ADJ_SCOPE_DEP):
-            detail = describe_adjustments(items, scope=scope)
-            if detail:
-                msgs.append(f"  [{scope}]（{len(detail.splitlines())}项）")
-                msgs.extend('    ' + ln for ln in detail.splitlines())
-    else:
-        msgs.append("  未提供调整项，按核对表内数值比较")
-    msgs.append("")
     msgs.append("========== 数据源读取 ==========")
-
     irp001 = _read_irp001_map(irp001_path)
-    msgs.append(f"  IRP001: 读取 {len(irp001)} 个项目（基准数据源）")
-
+    msgs.append(f"  IRP001: {len(irp001)} 个项目")
     irp002 = {}
     if irp002_path and os.path.exists(str(irp002_path)):
         irp002 = _read_irp002_map(irp002_path)
-        msgs.append(f"  IRP002: 读取 {len(irp002)} 个项目")
-    else:
-        msgs.append("  IRP002: 未提供，跳过 IRP002 相关列（F/G/H）校验")
-
-    deposit = {}
-    deposit, acct = {}, {}
+        msgs.append(f"  IRP002: {len(irp002)} 个项目")
+    dep, acct = {}, {}
     if base_check_path and os.path.exists(str(base_check_path)):
         base = _read_base_check_map(base_check_path)
-        deposit = base.get('deposit', {})
-        acct = base.get('acct', {})
-        if not base:
-            msgs.append("  保费基数核对表: 读取失败，跳过 B/C/D/E 列校验")
-        else:
-            msgs.append(f"  保费基数核对表: 存款归属 {len(deposit)} 项, "
-                        f"会计科目 {len(acct)} 项")
-            if not items:   # 未提供调整项时取表内 Q9/Q10
-                dep_adj = {'个人存款': base.get('adjust', {}).get('c3', 0.0),
-                           '单位存款': base.get('adjust', {}).get('c4', 0.0)}
+        dep, acct = base.get('deposit', {}), base.get('acct', {})
+        msgs.append(f"  保费基数核对表: 存款归属 {len(dep)} 项, 会计科目 {len(acct)} 项")
     else:
-        msgs.append("  保费基数核对表: 未提供，跳过 B/C/D/E 列校验")
+        msgs.append("  保费基数核对表: 未提供（存款归属/会计科目列将填“无对应数据”）")
 
-    adj_c3 = dep_adj.get('个人存款', 0.0)   # 存款归属核对：个人调整额（元）
-    adj_c4 = dep_adj.get('单位存款', 0.0)   # 存款归属核对：单位调整额（元）
-    msgs.append("")
-    msgs.append("========== 逐项校验明细 ==========")
+    items = normalize_adjustments(adjustments) if adjustments else []
+    _, dep_adj = summarize_adjustments(items) if items else ({}, {})
+    if not items and base_check_path and os.path.exists(str(base_check_path)):
+        base = _read_base_check_map(base_check_path)
+        dep_adj = {'个人存款': base.get('adjust', {}).get('c3', 0.0),
+                   '单位存款': base.get('adjust', {}).get('c4', 0.0)}
 
-    # ---- 构建输出工作簿 ----
-    wb = openpyxl.Workbook()
+    # ---- 打开模板 ----
+    tpl_path = _resolve_report_template(base_check_path, template_path)
+    if not os.path.exists(tpl_path):
+        return [f"ERROR: 未找到校验报告模板: {tpl_path}"]
+    wb = openpyxl.load_workbook(tpl_path)
     ws = wb.active
-    ws.title = "校验表"
+    msgs.append(f"  模板: {tpl_path}")
+    msgs.append("")
+    msgs.append("========== 逐项校验 ==========")
 
-    # ---- 第1行：标题 ----
-    ws.merge_cells('A1:H1')
-    _write_cell(ws, 1, 1, "存保申报数据校验表", number_fmt=None,
-                font=TITLE_FONT, fill=PatternFill(fill_type=None),
-                alignment=Alignment(horizontal='center', vertical='center'))
-    ws.row_dimensions[1].height = 32
+    # ---- 逐行填写 ----
+    overseas = False
+    mismatch = 0
+    filled = 0
+    # 是否含 IRP002 区块：以表头行 3 的 I/J/K 标题为准（避免模板中零散误输入）
+    has_irp002_cols = all(str(ws.cell(3, c).value or '').strip()
+                          for c in (9, 10, 11))
+    max_col = 11 if has_irp002_cols else 8
 
-    # ---- 第2-3行：分组表头 ----
-    # A2:A3 合并 = "项目名称"
-    ws.merge_cells('A2:A3')
-    _write_cell(ws, 2, 1, "项目名称", number_fmt=None,
-                font=Font(name='微软雅黑', size=10, bold=True),
-                alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
-    # B2 = "存款归属表与IRP001核对（0=一致/差额）"
-    ws.merge_cells('B2:B2')
-    _write_cell(ws, 2, 2, "存款归属表与\nIRP001核对\n（0=一致/差额）", number_fmt=None,
-                font=Font(name='微软雅黑', size=8, bold=True),
-                alignment=Alignment(horizontal='center', vertical='center', wrap_text=True))
-    # C2:E2 = "科目余额核对表与IRP001核对"
-    ws.merge_cells('C2:E2')
-    _write_cell(ws, 2, 3, "科目余额核对表与IRP001核对\n（0=一致/差额）", number_fmt=None,
-                font=Font(name='微软雅黑', size=9, bold=True),
-                alignment=Alignment(horizontal='center', vertical='center'))
-    # F2:H2 = "IRP002与IRP001核对"
-    ws.merge_cells('F2:H2')
-    _write_cell(ws, 2, 6, "IRP002与IRP001核对", number_fmt=None,
-                font=Font(name='微软雅黑', size=9, bold=True),
-                alignment=Alignment(horizontal='center', vertical='center'))
-
-    # 第3行子表头
-    sub_headers = ['', '差额（元）', '差额（元）', '差额（元）', '差额（元）',
-                   '本金（元）', '利息（元）', '合计（元）']
-    for ci, h in enumerate(sub_headers):
-        if ci == 0:
+    for r in range(1, ws.max_row + 1):
+        label = str(ws.cell(r, 1).value or '').strip()
+        if not label:
             continue
-        _write_cell(ws, 3, ci + 1, h, number_fmt=None,
-                    font=Font(name='微软雅黑', size=9, bold=True),
-                    alignment=Alignment(horizontal='center', vertical='center'))
-    ws.row_dimensions[2].height = 36
+        if '说明' in label and '：' in label:
+            continue
+        if label.startswith('二、'):
+            overseas = True
+        elif label.startswith('三、') or label.startswith('一、'):
+            overseas = False
 
-    # ---- 逐项填充数据 ----
-    error_count = 0
-    error_items = []   # 差异项明细，用于末尾汇总
-    for item in _VALIDATION_ITEMS:
-        excel_row, label, irp001_key, dep_key, acct_key, irp002_key, skip_cols = item
-        irp001_data = irp001.get(irp001_key, {})
+        item = _row_item_for_label(label, overseas)
+        if item is None:
+            continue
+        _, dep_key, acct_key, irp_key, irp002_key, _is_ovs = item
+        d_val = dep.get(dep_key) if dep_key else None
+        a = acct.get(acct_key) if acct_key else None
+        i1 = irp001.get(irp_key) if irp_key else None
+        i2 = irp002.get(irp002_key) if irp002_key else None
 
-        msgs.append(f"--- 第{excel_row}行「{label}」---")
-        if not irp001_data:
-            msgs.append(f"  WARNING: IRP001 中未找到「{irp001_key}」对应数据，基准值按 0 处理")
+        # B 列：存款归属（万元）vs 会计科目（万元）
+        b_left = d_val
+        b_right = (a or {}).get('principal', 0) / 10000.0 if a else None
+        b_text, b_err = _cmp_text('存款归属', b_left, '会计科目', b_right, TOL_WAN, '万元')
+        _write_report_cell(ws, r, 2, b_text, b_err)
+
+        # C~E 列：存款归属（万元）vs IRP001 本金（扣调整后精确至万元）/ 利息 / 合计
+        if d_val is not None and i1:
+            if _is_ovs:
+                adj = 0.0        # 调整值只针对境内个人/单位存款
+            elif label == '一、境内存款':
+                adj = dep_adj.get('个人存款', 0.0) + dep_adj.get('单位存款', 0.0)
+            else:
+                adj = dep_adj.get({'（一）个人存款': '个人存款',
+                                   '（二）单位存款': '单位存款'}.get(label, ''), 0.0)
+            irp_wan = excel_round((i1.get('principal', 0) - adj) / 10000.0, 0)
+            if abs(d_val - irp_wan) <= TOL_WAN:
+                c_text, c_err = MATCH_TEXT, False
+            else:
+                note = f"（已扣调整 {adj:,.2f} 元）" if adj else ''
+                c_text = (f"存款归属 {d_val:,.2f} 万元 / "
+                          f"IRP001 {irp_wan:,.0f} 万元{note}")
+                c_err = True
         else:
-            msgs.append(
-                f"  IRP001基准: 本金={irp001_data.get('principal', 0):,.2f}  "
-                f"利息={irp001_data.get('interest', 0):,.2f}  "
-                f"本息合计={irp001_data.get('total', 0):,.2f}")
+            c_text, c_err = NO_DATA_TEXT, False
+        _write_report_cell(ws, r, 3, c_text, c_err)
+        _write_report_cell(ws, r, 4, NO_DATA_TEXT, False)   # 存款归属口径无应付利息
+        _write_report_cell(ws, r, 5, NO_DATA_TEXT, False)   # 存款归属口径无合计
 
-        # A列：项目名称
-        _write_cell(ws, excel_row, 1, label, number_fmt=None,
-                    font=Font(name='微软雅黑', size=10, bold=True),
-                    alignment=Alignment(horizontal='left', vertical='center'))
+        # F~H 列：会计科目（元）vs IRP001（本金/利息/合计）
+        for col, field, left_name in ((6, 'principal', '会计科目'),
+                                      (7, 'interest', '会计科目'),
+                                      (8, 'total', '会计科目')):
+            l_val = (a or {}).get(field) if a else None
+            r_val = (i1 or {}).get(field) if i1 else None
+            text, err = _cmp_text(left_name, l_val, 'IRP001', r_val, TOL_YUAN, '元')
+            _write_report_cell(ws, r, col, text, err)
 
-        # ---- B列：存款归属核对 vs IRP001 ----
-        if not _skip_check(skip_cols, 'B'):
-            dep_val_wan = deposit.get(dep_key) if dep_key else None
-            if dep_val_wan is not None:
-                irp001_principal = irp001_data.get('principal', 0)
-                # 应用久悬户余额调整（模板校验页口径：先扣久悬户，再精确至万元）
-                adj_note = ""
-                if label == '（一）个人存款':
-                    irp001_principal -= adj_c3
-                    adj_note = f"（已扣除个人久悬户 c3={adj_c3:,.2f}）"
-                elif label == '（二）单位存款':
-                    irp001_principal -= adj_c4
-                    adj_note = f"（已扣除单位久悬户 c4={adj_c4:,.2f}）"
-                elif label == '一、境内存款':
-                    irp001_principal -= (adj_c3 + adj_c4)
-                    adj_note = f"（已扣除久悬户 c3+c4={adj_c3 + adj_c4:,.2f}）"
-                irp_in_wan = excel_round(irp001_principal / 10000.0, 0)
-                diff_wan = dep_val_wan - irp_in_wan
-                is_err = abs(diff_wan) * 10000 > 0.001  # 绝对容差 0.001 元，超出即标红
-                if is_err:
-                    error_count += 1
-                    error_items.append(
-                        f"第{excel_row}行「{label}」B列: 存款归属核对={dep_val_wan:,.2f}万元 vs "
-                        f"IRP001={irp_in_wan:,.0f}万元，差额={diff_wan:,.2f}万元")
-                result = 0 if not is_err else diff_wan * 10000
-                _write_cell(ws, excel_row, 2, result, is_error=is_err)
-                msgs.append(
-                    f"  B列 存款归属核对 vs IRP001: 核对表={dep_val_wan:,.2f}万元  "
-                    f"IRP001调整后={irp_in_wan:,.0f}万元{adj_note}  "
-                    f"差额={diff_wan:,.2f}万元  [{'ERROR' if is_err else 'OK'}]")
-            else:
-                _write_cell(ws, excel_row, 2, None, number_fmt=None)
-                if dep_key and deposit:
-                    msgs.append(f"  B列: 保费基数核对表中未找到「{dep_key}」，留空")
-        else:
-            _write_cell(ws, excel_row, 2, '/', number_fmt=None,
-                        fill=GRAY_FILL, font=NORMAL_FONT_V,
-                        alignment=Alignment(horizontal='center', vertical='center'))
+        # I~K 列（模板若存在 IRP002 块）：IRP002 vs IRP001
+        if has_irp002_cols:
+            is_count_row = '客户数' in label
+            for col, field in ((9, 'principal'), (10, 'interest'), (11, 'total')):
+                if is_count_row:
+                    # 户数行：IRP002 户数合计 vs IRP001 户数（本金列存放的是户数）
+                    if col == 9:
+                        text, err = _cmp_text('IRP002户数', (i2 or {}).get('count'),
+                                              'IRP001户数', (i1 or {}).get('principal'),
+                                              TOL_YUAN, '户')
+                    else:
+                        text, err = NO_DATA_TEXT, False
+                    _write_report_cell(ws, r, col, text, err)
+                    continue
+                l_val = (i2 or {}).get(field) if i2 else None
+                r_val = (i1 or {}).get(field) if i1 else None
+                if field == 'total' and i1 and r_val == 0:
+                    r_val = i1.get('principal', 0)      # 受保存款等只有本金的情况
+                text, err = _cmp_text('IRP002', l_val, 'IRP001', r_val, TOL_YUAN, '元')
+                _write_report_cell(ws, r, col, text, err)
 
-        # ---- C/D/E列：会计科目核对 vs IRP001 ----
-        # "用途=会计科目核对"的调整项在生成核对表时已通过"调整项"行计入
-        # 个人/单位存款，此处不再重复调整。
-        acct_data = acct.get(acct_key) if acct_key else None
-        if acct_key and acct_data is None and acct:
-            msgs.append(f"  C/D/E列: 保费基数核对表中未找到「{acct_key}」，留空")
-        for col_offset, field, col_letter in [
-            (3, 'principal', 'C'), (4, 'interest', 'D'), (5, 'total', 'E')
-        ]:
-            if _skip_check(skip_cols, col_letter):
-                _write_cell(ws, excel_row, col_offset, '/', number_fmt=None,
-                            fill=GRAY_FILL, font=NORMAL_FONT_V,
-                            alignment=Alignment(horizontal='center', vertical='center'))
-                continue
-
-            acct_val = acct_data.get(field) if acct_data else None
-            irp001_val = irp001_data.get(field, 0) if irp001_data else 0
-            if acct_val is not None:
-                adjusted_val = acct_val
-                is_err = not _diff_ok(adjusted_val, irp001_val)
-                tolerance = 0.001
-                if is_err:
-                    error_count += 1
-                    error_items.append(
-                        f"第{excel_row}行「{label}」{col_letter}列: 核对表={adjusted_val:,.2f} vs "
-                        f"IRP001={irp001_val:,.2f}，差额={adjusted_val - irp001_val:,.2f}元")
-                result = 0 if not is_err else (adjusted_val - irp001_val)
-                _write_cell(ws, excel_row, col_offset, result, is_error=is_err)
-                field_name = {'principal': '本金', 'interest': '利息', 'total': '本息合计'}[field]
-                msgs.append(
-                    f"  {col_letter}列 核对表{field_name} vs IRP001: 核对表={acct_val:,.2f}  "
-                    f"IRP001={irp001_val:,.2f}  差额={adjusted_val - irp001_val:,.2f}  "
-                    f"容差=±{tolerance:g}元  [{'ERROR' if is_err else 'OK'}]")
-            else:
-                _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
-
-        # ---- F/G/H列：IRP002 vs IRP001 ----
-        irp002_data = irp002.get(irp002_key) if irp002_key else None
-        if irp002_key and irp002_data is None and irp002:
-            msgs.append(f"  F/G/H列: IRP002 中未找到「{irp002_key}」，留空")
-        for col_offset, field, col_letter in [
-            (6, 'principal', 'F'), (7, 'interest', 'G'), (8, 'total', 'H')
-        ]:
-            if _skip_check(skip_cols, col_letter):
-                _write_cell(ws, excel_row, col_offset, '/', number_fmt=None,
-                            fill=GRAY_FILL, font=NORMAL_FONT_V,
-                            alignment=Alignment(horizontal='center', vertical='center'))
-                continue
-
-            irp002_val = irp002_data.get(field) if irp002_data else None
-            is_count_item = label in ('被保险存款客户数', '最高偿付限额以内客户数')
-            if is_count_item and col_letter == 'F':
-                irp002_val = irp002_data.get('count') if irp002_data else None
-                irp001_val = irp001_data.get('principal', 0)
-            elif is_count_item:
-                irp002_val = None
-                irp001_val = 0
-            else:
-                irp001_val = irp001_data.get(field, 0) if irp001_data else 0
-
-            if irp002_val is not None:
-                if field == 'total' and irp001_val == 0 and irp001_data:
-                    irp001_val = irp001_data.get('principal', 0)
-                is_err = not _diff_ok(irp002_val, irp001_val)
-                tolerance = 0.001
-                if is_err:
-                    error_count += 1
-                    error_items.append(
-                        f"第{excel_row}行「{label}」{col_letter}列: IRP002={irp002_val:,.2f} vs "
-                        f"IRP001={irp001_val:,.2f}，差额={irp002_val - irp001_val:,.2f}元")
-                result = 0 if not is_err else (irp002_val - irp001_val)
-                _write_cell(ws, excel_row, col_offset, result, is_error=is_err)
-                field_name = {'principal': '本金', 'interest': '利息', 'total': '本息合计'}[field]
-                msgs.append(
-                    f"  {col_letter}列 IRP002{field_name} vs IRP001: IRP002={irp002_val:,.2f}  "
-                    f"IRP001={irp001_val:,.2f}  差额={irp002_val - irp001_val:,.2f}  "
-                    f"容差=±{tolerance:g}元  [{'ERROR' if is_err else 'OK'}]")
-            else:
-                _write_cell(ws, excel_row, col_offset, None, number_fmt=None)
+        errs = [b_err, c_err] + [False] * (max_col - 2)
+        if b_err or c_err:
+            mismatch += 1
+        filled += 1
+        msgs.append(f"  {label}: B列[{b_text}] C列[{c_text}]")
+        if a and i1:
+            for field, fname in (('principal', '本金'), ('interest', '利息'), ('total', '合计')):
+                l_val, r_val = (a or {}).get(field), (i1 or {}).get(field)
+                if l_val is not None and r_val is not None and not _diff_ok(l_val, r_val):
+                    mismatch += 0
+                    msgs.append(f"    F/G/H {fname}: 会计科目 {l_val:,.2f} / IRP001 {r_val:,.2f}")
 
     # ---- 说明行 ----
-    note_row = 22
-    ws.merge_cells(f'A{note_row}:H{note_row}')
-    _write_cell(ws, note_row, 1,
-                '说明：灰色(/)部分不校验。红色底色单元格表示核对有误。'
-                'B~H列：0=一致，非零值为差额（元）。'
-                '三组核对（存款归属核对/会计科目核对/IRP002 vs IRP001）'
-                '均采用绝对容差 0.001 元，超出即标红。'
-                '调整项（用途=会计科目核对）已计入核对表，不再重复调整。'
-                '住房公积金存款/社保基金存款仅核对存款归属列（合并模板未设会计科目行）。',
-                number_fmt=None,
-                font=Font(name='微软雅黑', size=9, italic=True, color="666666"),
-                alignment=Alignment(horizontal='left', vertical='center'))
+    for r in range(1, ws.max_row + 1):
+        v = str(ws.cell(r, 1).value or '')
+        if v.startswith('说明'):
+            cell = ws.cell(r, 1)
+            cell.value = (
+                "说明：B列＝存款归属核对与会计科目核对（本金，万元）比较；"
+                "C~E列＝存款归属核对与IRP001（本金/利息/合计）比较；"
+                "F~H列＝会计科目核对与IRP001（本金/利息/合计）比较"
+                + ("；I~K列＝IRP002与IRP001比较" if has_irp002_cols else "") +
+                "。填写约定：无对应数据＝该口径没有这项数据；核对一致＝在容差内相等"
+                f"（元级 {TOL_YUAN:g} 元）；核对不一致＝列出双方数值（红色底）。")
+            cell.font = Font(name='微软雅黑', size=9, italic=True, color="666666")
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+            break
 
-    # ---- 列宽调整 ----
-    ws.column_dimensions['A'].width = 24
-    for col_letter in ['B', 'C', 'D', 'E', 'F', 'G', 'H']:
-        ws.column_dimensions[col_letter].width = 18
+    ws.column_dimensions['A'].width = 26
+    for col in 'BCDEFGHIJK':
+        ws.column_dimensions[col].width = 30
 
-    # ---- 打印设置 ----
-    ws.sheet_properties.pageSetUpPr = openpyxl.worksheet.properties.PageSetupProperties(
-        fitToPage=True)
-    ws.page_setup.orientation = 'landscape'
-
-    # ---- 保存 ----
     wb.save(str(output_path))
     wb.close()
 
     msgs.append("")
     msgs.append("========== 校验结果汇总 ==========")
     msgs.append(f"校验报告已生成: {output_path}")
-    msgs.append(f"共校验 {len(_VALIDATION_ITEMS)} 个项目，发现 {error_count} 处差异")
-    if error_count > 0:
-        msgs.append("差异项明细:")
-        for ei in error_items:
-            msgs.append(f"  ✗ {ei}")
-        msgs.append(">>> 请检查标红单元格对应的数据来源")
-    else:
+    msgs.append(f"共填写 {filled} 个项目行，其中 {mismatch} 行存在不一致（已标红）")
+    if mismatch == 0:
         msgs.append(">>> 所有校验项一致 ✓")
+    else:
+        msgs.append(">>> 请检查标红单元格对应的两个数值")
     return msgs
+
+
+def _write_report_cell(ws, row, col, text, is_error):
+    """
+    写入报告单元格：不一致标红，其余按模板原样式。
+
+    模板存在合并单元格（如 F19:H19），合并区域内只有左上角可写，
+    其余位置跳过（内容已由左上角单元格承载）。
+
+    返回:
+        str or None: 实际写入的文本；跳过时返回 None
+    """
+    r, c = _resolve_merged(ws, row, col)
+    if (r, c) != (row, col):
+        return None                     # 合并区域内的从属单元格
+    cell = ws.cell(r, c)
+    cell.value = text
+    cell.font = RED_FONT_V if is_error else NORMAL_FONT_V
+    cell.fill = RED_FILL if is_error else PatternFill(fill_type=None)
+    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    cell.border = THIN_BORDER
+    return text
