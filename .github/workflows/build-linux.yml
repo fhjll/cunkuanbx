@@ -3,10 +3,12 @@ name: Build Linux (麒麟/统信UOS) 程序
 # 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序。
 # 设计要点：
 #   - PyInstaller 不能跨平台/跨架构编译，必须在 Linux 上构建；
-#   - 构建放在 debian:bullseye 镜像里进行（glibc 2.31，覆盖麒麟 V10 SP2/SP3、
-#     统信 UOS 20 等；更老的麒麟 V10 SP1 请用 build_linux.sh 在本机打包）；
-#   - 用发行版自带 python3.9 + python3-dev（提供共享 libpython，PyInstaller 需要），
-#     PyInstaller 6.x（不再依赖 pkg_resources）；
+#   - 构建放在 python:3.9-slim-bullseye 镜像里进行（glibc 2.31，覆盖麒麟
+#     V10 SP2/SP3、统信 UOS 20 等；更老的麒麟 V10 SP1 请用 build_linux.sh
+#     在本机打包）；
+#   - 该官方镜像自带共享版 libpython（PyInstaller 需要），且不依赖 apt
+#     （bullseye 的 security 源已失效），只用 pip 装 PyInstaller 6.x
+#     （不再依赖 pkg_resources）；
 #   - 产物先在容器内用 ASCII 名生成，回到宿主后再改名为中文；
 #   - 构建失败时把最后 30 行日志以 ::error:: 注解输出（便于在 Actions 页面
 #     与 API 上直接看到失败原因）。
@@ -37,18 +39,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in debian:bullseye container (glibc 2.31)
+      - name: Build in python:3.9-slim-bullseye container (glibc 2.31)
         run: |
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            debian:bullseye bash -euxc '
-              apt-get update
-              apt-get install -y --no-install-recommends \
-                python3 python3-dev python3-pip binutils ca-certificates
-              python3 -m pip install --upgrade pip wheel "setuptools<81"
-              python3 -m pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
-              python3 -m PyInstaller --onefile --noconfirm --name app \
+            python:3.9-slim-bullseye bash -euxc '
+              # 官方 python 镜像自带共享版 libpython（PyInstaller 需要），
+              # 且不必用 apt（bullseye 的 security 源已失效），只装 pip 包
+              pip install --upgrade pip wheel "setuptools<81"
+              pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
+              pyinstaller --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
@@ -88,18 +89,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in debian:bullseye (arm64) container
+      - name: Build in python:3.9-slim-bullseye (arm64) container
         run: |
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            arm64v8/debian:bullseye bash -euxc '
-              apt-get update
-              apt-get install -y --no-install-recommends \
-                python3 python3-dev python3-pip binutils ca-certificates
-              python3 -m pip install --upgrade pip wheel "setuptools<81"
-              python3 -m pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
-              python3 -m PyInstaller --onefile --noconfirm --name app \
+            arm64v8/python:3.9-slim-bullseye bash -euxc '
+              pip install --upgrade pip wheel "setuptools<81"
+              pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
+              pyinstaller --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
