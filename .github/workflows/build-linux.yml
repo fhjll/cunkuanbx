@@ -12,6 +12,9 @@ name: Build Linux (麒麟/统信UOS) 程序
 #   - 构建失败时把最后 30 行日志以 ::error:: 注解输出（便于在 Actions 页面
 #     与 API 上直接看到失败原因）。
 
+permissions:
+  contents: write        # 失败时把构建日志推到 ci-log-<run> 分支便于排查
+
 on:
   push:
     branches: [main]
@@ -45,7 +48,10 @@ jobs:
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             python:3.9-bullseye bash -euxc '
               # 官方 python 镜像（完整版）自带共享版 libpython 与 binutils/objdump
-              # （PyInstaller 两者都需要），且不必用 apt（bullseye security 源已失效）
+              # （PyInstaller 两者都需要）；Qt 分析期需要 libGL 等运行库，apt 失败不中断
+              apt-get update || true
+              apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+                libxkbcommon0 libdbus-1-3 ca-certificates || true
               objdump --version | head -1
               pip install --upgrade pip wheel "setuptools<81"
               pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
@@ -81,6 +87,20 @@ jobs:
           name: build-linux-log
           path: build-linux.log
           if-no-files-found: ignore
+
+      - name: Publish build log to branch (on failure)
+        if: failure()
+        run: |
+          set +e
+          mkdir -p ci-logs
+          { echo "== tail 200 of build-linux.log =="; tail -200 build-linux.log 2>/dev/null; } > ci-logs/build-linux.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "ci-log-$GITHUB_RUN_ID"
+          git add -f ci-logs/build-linux.log
+          git commit -m "ci log for run $GITHUB_RUN_ID"
+          git push -f origin "HEAD:ci-log-$GITHUB_RUN_ID" || echo "::warning::推送日志分支失败（token 无写权限）"
+
 
   build-linux-arm64:
     # 银河麒麟跑在飞腾/鲲鹏等 ARM64 平台时使用（需仓库可用 arm64 运行器）
