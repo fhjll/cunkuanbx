@@ -32,13 +32,13 @@ on:
 jobs:
   build-linux-x64:
     if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.arch == 'x64' || github.event.inputs.arch == 'both' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Build in manylinux2014 container (glibc 2.17)
         run: |
-          set -o pipefail
+          set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_x86_64 bash -euxc '
@@ -51,8 +51,8 @@ jobs:
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            echo "::error title=Linux构建失败::$(tail -30 build-linux.log | tr '\n' '|' | sed 's/%/%25/g')"
-            exit "$rc"
+            echo "::error title=Linux构建失败 (exit $rc)::$(tail -25 build-linux.log | tr '\n' '|' | sed 's/%/%25/g;s/\r//g')"
+            exit 1
           fi
           mv dist/app "dist/存保审核工具"
 
@@ -84,7 +84,7 @@ jobs:
 
       - name: Build in manylinux2014_aarch64 container
         run: |
-          set -o pipefail
+          set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_aarch64 bash -euxc '
@@ -97,8 +97,8 @@ jobs:
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            echo "::error title=Linux(arm64)构建失败::$(tail -30 build-linux.log | tr '\n' '|' | sed 's/%/%25/g')"
-            exit "$rc"
+            echo "::error title=Linux(arm64)构建失败 (exit $rc)::$(tail -25 build-linux.log | tr '\n' '|' | sed 's/%/%25/g;s/\r//g')"
+            exit 1
           fi
           mv dist/app "dist/存保审核工具"
 
