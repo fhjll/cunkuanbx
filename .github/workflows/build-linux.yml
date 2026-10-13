@@ -42,10 +42,10 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_x86_64 bash -euxc '
-              PYBIN=$(ls -d /opt/python/cp3[89]-cp3[89]*/bin /opt/python/cp31[0-2]-cp31[0-2]*/bin 2>/dev/null | head -1)
+              PYBIN=$(ls -d /opt/python/cp38-cp38/bin 2>/dev/null || ls -d /opt/python/cp3*-cp3*/bin | head -1)
               echo "使用 Python: $PYBIN"
-              "$PYBIN/pip" install --upgrade pip wheel setuptools
-              "$PYBIN/pip" install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              "$PYBIN/pip" install --upgrade pip wheel "setuptools<81"
+              "$PYBIN/pip" install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
               "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
@@ -88,10 +88,10 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             quay.io/pypa/manylinux2014_aarch64 bash -euxc '
-              PYBIN=$(ls -d /opt/python/cp3[89]-cp3[89]*/bin /opt/python/cp31[0-2]-cp31[0-2]*/bin 2>/dev/null | head -1)
+              PYBIN=$(ls -d /opt/python/cp38-cp38/bin 2>/dev/null || ls -d /opt/python/cp3*-cp3*/bin | head -1)
               echo "使用 Python: $PYBIN"
-              "$PYBIN/pip" install --upgrade pip wheel setuptools
-              "$PYBIN/pip" install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              "$PYBIN/pip" install --upgrade pip wheel "setuptools<81"
+              "$PYBIN/pip" install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
               "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
