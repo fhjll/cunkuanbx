@@ -1,26 +1,40 @@
 name: Build Windows EXE
 
+# Windows 可执行程序：
+#   build-win10    64 位 —— Python 3.12（Win10/11）
+#   build-win7-x64 64 位 —— Python 3.8（3.8 是最后支持 Windows 7 的版本）
+#   build-win7-x86 32 位 —— Python 3.8 x86（32 位 Win7）
+# PyInstaller 不能交叉编译，32 位产物必须用 32 位 Python 构建，
+# 因此 32 位作业通过 actions/setup-python 的 architecture: x86 安装 32 位解释器。
+
 on:
   push:
     branches: [main]
+    paths:
+      - '**.py'
+      - 'templates/**'
+      - 'requirements.txt'
+      - '.github/workflows/build-exe.yml'
   workflow_dispatch:
     inputs:
       target:
-        description: "Target Windows version"
+        description: "要构建的目标"
         type: choice
-        default: "win10"
+        default: "all"
         options:
+          - all
           - win10
-          - win7
+          - win7-x64
+          - win7-x86
 
 jobs:
   build-win10:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'win10' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'win10' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.12 (x64)
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -42,17 +56,17 @@ jobs:
           name: 存保审核工具-win10-x64
           path: dist/存保审核工具.exe
 
-  build-win7:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'win7' }}
+  build-win7-x64:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'win7-x64' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.8
+      - name: Set up Python 3.8 (x64, Win7 兼容)
         uses: actions/setup-python@v5
         with:
           python-version: "3.8"
-          cache: pip
+          architecture: "x64"
 
       - name: Install dependencies
         run: |
@@ -60,12 +74,58 @@ jobs:
           pip install pyinstaller
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-      - name: Build EXE
+      - name: Build EXE (Win7 64-bit)
         run: |
-          pyinstaller --onefile --windowed --name 存保审核工具_Win7 --add-data "templates;templates" gui.py
+          pyinstaller --onefile --windowed --name 存保审核工具_Win7_x64 --add-data "templates;templates" gui.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: 存保审核工具-win7-x64
-          path: dist/存保审核工具_Win7.exe
+          path: dist/存保审核工具_Win7_x64.exe
+
+  build-win7-x86:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'win7-x86' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.8 (x86, 32 位)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          architecture: "x86"
+
+      - name: Install dependencies (32-bit wheels)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      - name: Show interpreter bitness (sanity check)
+        run: |
+          python -c "import platform,struct;print('python:',platform.python_version(),'arch:',platform.machine(),'bits:',struct.calcsize('P')*8)"
+
+      - name: Build EXE (Win7 32-bit)
+        run: |
+          pyinstaller --onefile --windowed --name 存保审核工具_Win7_x86 --add-data "templates;templates" gui.py
+
+      - name: Verify generated EXE bitness
+        run: |
+          $f = "dist/存保审核工具_Win7_x86.exe"
+          $fs = [IO.File]::OpenRead((Resolve-Path $f))
+          $br = New-Object IO.BinaryReader($fs)
+          $fs.Seek(0x3C, 'Begin') | Out-Null
+          $peOff = $br.ReadInt32()
+          $fs.Seek($peOff + 4, 'Begin') | Out-Null
+          $machine = $br.ReadUInt16()
+          $br.Close()
+          # 0x014c = i386(32位)，0x8664 = x64
+          Write-Host ("PE machine = 0x{0:X4}" -f $machine)
+          if ($machine -ne 0x014c) { throw "产物不是 32 位程序！" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-win7-x86
+          path: dist/存保审核工具_Win7_x86.exe
