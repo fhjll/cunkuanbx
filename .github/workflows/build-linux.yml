@@ -1,0 +1,87 @@
+name: Build Linux (麒麟/统信UOS) 程序
+
+# 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序。
+# 要点：
+#   - PyInstaller 不能跨平台/跨架构编译，必须在 Linux 上构建；
+#   - 为兼容麒麟 V10 等较老的 glibc，x64 版本在 ubuntu:18.04（glibc 2.27）
+#     容器里构建。注意：容器内不能直接跑 actions（node20 需要 glibc≥2.28），
+#     所以先由宿主 runner 检出代码，再用 docker run 进容器构建；
+#   - aarch64（飞腾/鲲鹏）版本用 arm64 运行器 + arm64 容器，手动触发。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'templates/**'
+      - 'requirements.txt'
+      - '.github/workflows/build-linux.yml'
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target CPU arch"
+        type: choice
+        default: "x64"
+        options:
+          - x64
+          - arm64
+          - both
+
+jobs:
+  build-linux-x64:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.arch == 'x64' || github.event.inputs.arch == 'both' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in ubuntu:18.04 container (glibc 2.27，兼容麒麟 V10 SP1+)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src ubuntu:18.04 bash -euxc '
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              python3 python3-pip python3-dev binutils ca-certificates git
+            python3 -m pip install --upgrade "pip<22" "setuptools<60" wheel
+            python3 -m pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+            python3 -m PyInstaller --onefile --noconfirm \
+              --name 存保审核工具 \
+              --add-data "templates:templates" \
+              gui.py
+          '
+
+      - name: Compatibility info
+        run: |
+          ls -lh dist/
+          objdump -T "dist/存保审核工具" | grep -o 'GLIBC_[0-9.]*' | sort -u | tail -3 || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-linux-x64
+          path: dist/存保审核工具
+
+  build-linux-arm64:
+    # 银河麒麟跑在飞腾/鲲鹏等 ARM64 平台时使用（需仓库可用 arm64 运行器）
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.arch == 'arm64' || github.event.inputs.arch == 'both') }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in arm64 ubuntu:18.04 container
+        run: |
+          docker run --rm -v "$PWD":/src -w /src arm64v8/ubuntu:18.04 bash -euxc '
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              python3 python3-pip python3-dev binutils ca-certificates git
+            python3 -m pip install --upgrade "pip<22" "setuptools<60" wheel
+            python3 -m pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+            python3 -m PyInstaller --onefile --noconfirm \
+              --name 存保审核工具 \
+              --add-data "templates:templates" \
+              gui.py
+          '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-linux-arm64
+          path: dist/存保审核工具

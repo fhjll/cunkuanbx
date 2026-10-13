@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=存款保险申报表审核工具
+Name[zh_CN]=存款保险申报表审核工具
+Comment=存款归属/科目余额核对、保费基数核对表生成与校验
+Comment[zh_CN]=保费基数核对表生成与数据校验
+# 请把下面的路径改成程序实际所在目录（保持 run_linux.sh 紧随其后）
+Exec=bash "/opt/存保审核工具/run_linux.sh"
+Path=/opt/存保审核工具
+Icon=applications-office
+Terminal=false
+Categories=Office;Finance;
+StartupNotify=true

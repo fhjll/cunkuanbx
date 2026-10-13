@@ -9,3 +9,7 @@ dist/
 .DS_Store
 .env
 *.egg-info/
+调整值配置.json
+测试数据/
+.claude/
+templates/*.xls

@@ -113,6 +113,30 @@ def to_float(val):
         return 0.0
 
 
+def excel_round(value, digits=0):
+    """
+    Excel 的 ROUND 语义：四舍五入（0.5 远离零）。
+
+    与 Python 内置 round() 的"银行家舍入"不同，模板中
+    ROUND((IRP001本金 - 久悬户)/10000, 0) 这类公式依赖 Excel 语义，
+    因此统一通过本函数计算。
+
+    参数:
+        value (float): 待舍入的数值
+        digits (int): 保留小数位数
+
+    返回:
+        float: 舍入结果
+
+    使用示例:
+        >>> excel_round(2.5)      # Excel ROUND(2.5,0) = 3，Python round(2.5) = 2
+        3.0
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    q = Decimal(1).scaleb(-int(digits or 0))
+    return float(Decimal(repr(float(value))).quantize(q, rounding=ROUND_HALF_UP))
+
+
 def _is_xlsx_format(filepath):
     """
     检测文件是否实际上是 OOXML (xlsx) 格式，无论扩展名是什么。
