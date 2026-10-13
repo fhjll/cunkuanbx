@@ -3,9 +3,9 @@ name: Build Linux (麒麟/统信UOS) 程序
 # 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序。
 # 设计要点：
 #   - PyInstaller 不能跨平台/跨架构编译，必须在 Linux 上构建；
-#   - 构建放在 manylinux2014 官方镜像里进行（glibc 2.17），产物对
-#     麒麟 V10 各版本、统信 UOS、Debian/RHEL 系都能直接运行；
-#   - 容器里的 Python 用绝对路径调用（镜像自带 /opt/python/*），不依赖 PATH；
+#   - 构建放在 ubuntu:18.04 镜像里进行（glibc 2.27，覆盖麒麟 V10 SP1 及以上）；
+#     该镜像已 EOL，软件源改指 old-releases 才能装包；
+#   - 用发行版自带 python3（3.6）+ python3-dev（提供共享 libpython，PyInstaller 需要）；
 #   - 产物先在容器内用 ASCII 名生成，回到宿主后再改名为中文；
 #   - 构建失败时把最后 30 行日志以 ::error:: 注解输出（便于在 Actions 页面
 #     与 API 上直接看到失败原因）。
@@ -41,12 +41,16 @@ jobs:
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            quay.io/pypa/manylinux2014_x86_64 bash -euxc '
-              PYBIN=$(ls -d /opt/python/cp38-cp38/bin 2>/dev/null || ls -d /opt/python/cp3*-cp3*/bin | head -1)
-              echo "使用 Python: $PYBIN"
-              "$PYBIN/pip" install --upgrade pip wheel "setuptools<81"
-              "$PYBIN/pip" install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
-              "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
+            ubuntu:18.04 bash -euxc '
+              # 18.04 已进入 ESM，软件源指向 old-releases 才能装包
+              sed -i "s|archive.ubuntu.com|old-releases.ubuntu.com|g; \
+                      s|security.ubuntu.com|old-releases.ubuntu.com|g" /etc/apt/sources.list
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                python3 python3-dev python3-pip build-essential binutils ca-certificates
+              python3 -m pip install --upgrade "pip<22" "setuptools<81" wheel
+              python3 -m pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              python3 -m PyInstaller --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
@@ -87,12 +91,15 @@ jobs:
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            quay.io/pypa/manylinux2014_aarch64 bash -euxc '
-              PYBIN=$(ls -d /opt/python/cp38-cp38/bin 2>/dev/null || ls -d /opt/python/cp3*-cp3*/bin | head -1)
-              echo "使用 Python: $PYBIN"
-              "$PYBIN/pip" install --upgrade pip wheel "setuptools<81"
-              "$PYBIN/pip" install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
-              "$PYBIN/pyinstaller" --onefile --noconfirm --name app \
+            arm64v8/ubuntu:18.04 bash -euxc '
+              sed -i "s|archive.ubuntu.com|old-releases.ubuntu.com|g; \
+                      s|security.ubuntu.com|old-releases.ubuntu.com|g" /etc/apt/sources.list
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                python3 python3-dev python3-pip build-essential binutils ca-certificates
+              python3 -m pip install --upgrade "pip<22" "setuptools<81" wheel
+              python3 -m pip install pyinstaller==4.10 openpyxl xlrd PyQt5==5.15.4
+              python3 -m PyInstaller --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
