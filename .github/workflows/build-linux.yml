@@ -47,7 +47,6 @@ jobs:
               # 官方 python 镜像（完整版）自带共享版 libpython 与 binutils/objdump
               # （PyInstaller 两者都需要），且不必用 apt（bullseye security 源已失效）
               objdump --version | head -1
-              python -c "import sysconfig; print('shared:', sysconfig.get_config_var('Py_ENABLE_SHARED'))"
               pip install --upgrade pip wheel "setuptools<81"
               pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
               pyinstaller --onefile --noconfirm --name app \
