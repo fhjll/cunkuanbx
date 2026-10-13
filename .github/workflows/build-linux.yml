@@ -115,6 +115,9 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
             arm64v8/python:3.9-bullseye bash -euxc '
+              apt-get update || true
+              apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+                libxkbcommon0 libdbus-1-3 ca-certificates || true
               pip install --upgrade pip wheel "setuptools<81"
               pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
               pyinstaller --onefile --noconfirm --name app \
