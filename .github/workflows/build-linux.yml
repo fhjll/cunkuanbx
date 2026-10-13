@@ -57,6 +57,10 @@ jobs:
               pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
               pyinstaller --onefile --noconfirm --name app \
                 --add-data "templates:templates" gui.py
+              # 产物改名在容器内完成：容器以 root 写入挂载目录，
+              # 宿主机（runner 用户）无权在 dist/ 里改名
+              mv dist/app "dist/存保审核工具"
+              ls -l dist/
             ' 2>&1 | tee build-linux.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
@@ -67,7 +71,6 @@ jobs:
             done < <(tail -8 build-linux.log)
             exit 1
           fi
-          mv dist/app "dist/存保审核工具"
 
       - name: Compatibility info
         run: |
