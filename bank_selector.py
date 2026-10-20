@@ -178,8 +178,9 @@ class BankSelector(QGroupBox):
     def _open_manager(self):
         dlg = BankManageDialog(self, self.mgr, self.current_bank())
         dlg.exec_()
-        current = self.current_bank()
-        self.refresh(current)
+        # 管理窗口里可能重命名/删除/新增了银行类型，统一以管理器记录的
+        # last_bank 为准刷新（重命名时会同步更新 last_bank）
+        self.refresh(self.mgr.last_bank)
         self.bank_changed.emit(self.current_bank())
         self._emit_template_changed()
 
