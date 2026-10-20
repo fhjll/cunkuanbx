@@ -812,7 +812,7 @@ class MainWindow(QMainWindow):
         btn_seed = QPushButton("从附件5读取")
         btn_seed.setFont(QFont("Microsoft YaHei", 9))
         btn_seed.setCursor(Qt.PointingHandCursor)
-        btn_seed.setToolTip("按银行报送的附件5（保费基数核对表）Q7~Q10 "
+        btn_seed.setToolTip("按银行报送的附件5（保费基数核对表）差额说明列 "
                             "重建标准调整项（个体工商户 + 久悬户）")
         btn_seed.clicked.connect(self._seed_adjustments_from_att5_clicked)
         btn_row.addWidget(btn_seed)
@@ -1258,7 +1258,7 @@ class MainWindow(QMainWindow):
             self._log(f"[调整值] 配置保存失败: {e}")
 
     def _seed_adjustments_from_att5_clicked(self):
-        """按钮：从附件5重建标准调整项（金额取自 Q7~Q10）。"""
+        """按钮：从附件5重建标准调整项（金额取差额说明列前四格）。"""
         att5 = self._get_path('att5')
         paths = [att5] if att5 else []
         if not paths:
@@ -1272,7 +1272,8 @@ class MainWindow(QMainWindow):
         """
         按标准口径（个体工商户 + 久悬户）重建调整项，金额取自附件5。
 
-        附件5 的 Q7/Q8 = 个人侧净调整额（本金/利息）、Q9/Q10 = 久悬户
+        附件5 的差额说明列（旧模板 Q / 新模板 P）前四格：
+        第7/8行 = 个人侧净调整额（本金/利息）、第9/10行 = 久悬户
         （个 人/单位），对应默认的六条调整项。
 
         参数:
@@ -1419,9 +1420,10 @@ class MainWindow(QMainWindow):
         执行操作1：生成保费基数核对表。
 
         数据来源：
-          - 存款归属核对（C~F列）← A1411 / A2411 月报表（万元）
-          - 会计科目核对（G~M列）← 科目余额表（元）
-          - 被保险存款申报表（N~P列）← IRP001 申报表（元）
+          - 存款归属核对 ← A1411 / A2411 月报表（万元）
+          - 会计科目核对 ← 科目余额表（元）
+          - 被保险存款申报表（IRP001）← IRP001 申报表（元）
+        各数据块所在列按模板表头自动识别（旧版/新版附5模板均支持），
         再按模板公式对子项数据计算合并，并写入校验页差额。
         """
         errs = self._check_required_files(['a1411', 'a2411'])

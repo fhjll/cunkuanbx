@@ -6,9 +6,11 @@
 
 功能说明：
   按《保费基数核对表（模板）》把三块数据填进同一张表：
-    1. 存款归属核对（C~F 列）—— 取自 A1411 / A2411 月报表（万元）
-    2. 会计科目核对（G~M 列）—— 取自科目余额表（元）
-    3. 被保险存款申报表（N~P 列）—— 取自 IRP001 申报表（元）
+    1. 存款归属核对 —— 取自 A1411 / A2411 月报表（万元）
+    2. 会计科目核对 —— 取自科目余额表（元）
+    3. 被保险存款申报表（IRP001）—— 取自 IRP001 申报表（元）
+  各数据块所在列按模板表头自动识别（旧版模板：存款归属 C~F、会计科目 G~M、
+  IRP001 N~P；新版附5模板去掉了"符号"列，依次为 C~E、F~L、M~O），
   再按模板中的公式对子项数据逐级计算合并（个人/单位/财政性/非存款类/
   高级管理人员/不予保险/被保险存款合计），并把结果固化为静态数值。
 
@@ -19,8 +21,8 @@
     - account_checker.AccountChecker 的模板填充逻辑（I / L 列）
 
 计算顺序（与模板公式一致）：
-  Step 1 读模板：解析每行的子项代码（C 列）、科目代码（G 列本金 / J 列利息）
-         以及 F/I/L/M/N/O/P 各列的公式
+  Step 1 读模板：按表头识别各数据块列位，解析每行的子项代码、科目代码，
+          以及主表中的全部公式
   Step 2 明细取数：按代码逐项取数（存款归属取 A1411/A2411，会计科目取科目余额表）
   Step 3 公式计算：按模板公式（含跨行引用、SUM 区域、IF/ROUND）逐条求值
   Step 4 固化输出：把计算值与校验页差额写入 .xlsx（覆盖公式，全部为静态数值）
@@ -28,7 +30,7 @@
 调整值（可自定义的调整项列表）：
   每个调整项包含：名称、用途、对象、字段、方式、金额（元）
     用途：会计科目核对（写入表内"调整项"行，参与会计科目合计）
-          存款归属核对（比较时按方式增减 IRP001 本金，写入 Q9/Q10）
+          存款归属核对（比较时按方式增减 IRP001 本金，写入差额说明列第9/10行）
     对象：个人存款 / 单位存款
     字段：本金 / 应付利息（用途=存款归属核对时只比较本金，固定为"本金"）
     方式：增加 / 扣减
@@ -43,7 +45,7 @@
     · 个体工商户利息  会计科目核对 个人↔单位 应付利息 增加   （个人＋、单位－）
     · 个人久悬户      存款归属核对 个人存款 本金     扣减   → Q9
     · 单位久悬户      存款归属核对 单位存款 本金     扣减   → Q10
-  Q7/Q8 保存"由单位调整至个人"的个人侧净额（本金/利息），供外部核对。
+  差额说明列第7/8行保存"由单位调整至个人"的个人侧净额（本金/利息），供外部核对。
 
 单位说明：
   - A1411/A2411：万元（与存款归属表口径一致，无需换算）
@@ -79,14 +81,138 @@ from account_checker import (_ExcelSheets, _read_attachment_summary,
 MAIN_SHEET_NAME = '保费基数核对表'
 CHECK_SHEET_NAME = '校验'
 
-# 需要读取公式的列：C 列（兼容旧式"合计公式写在 C 列"的模板）、
-# F 列（存款归属金额）、I/L 列（会计科目本金/利息）、
-# M 列（会计科目合计）、N/O/P 列（IRP001 本金/利息/合计）
-FORMULA_COLUMNS = ('C', 'F', 'I', 'L', 'M', 'N', 'O', 'P')
+# ------------------------------------------------------------
+# 模板列布局（按表头自动识别，兼容新旧两版附5模板）
+# ------------------------------------------------------------
+# 旧版合并模板：存款归属 C/D/E/F（F=本金，E=符号）；
+#              会计科目 G/H/I（本金）与 J/K/L（利息），合计 M；
+#              IRP001 N/O/P，差额说明 Q。
+# 新版附5模板（2026年10月版 / 模板1019）：去掉"符号"列，其后各列左移一列：
+#              存款归属 C/D/E（E=本金）；
+#              会计科目 F/G/H（本金）与 I/J/K（利息），合计 L；
+#              IRP001 M/N/O，差额说明 P。
+# 实际列位由 detect_template_layout() 读表头文字确定，业务代码不再写死列号。
+DEFAULT_LAYOUT = {
+    'dep_code': 'C', 'dep_name': 'D', 'dep_amount': 'F',
+    'acct_p_code': 'G', 'acct_p_name': 'H', 'acct_p_amount': 'I',
+    'acct_i_code': 'J', 'acct_i_name': 'K', 'acct_i_amount': 'L',
+    'acct_total': 'M', 'irp_p': 'N', 'irp_i': 'O', 'irp_total': 'P',
+    'note': 'Q',
+}
 
-# 调整值写入单元格（模板 Q 列为「差额说明」，
-# Q7/Q8=个人侧净调整额（会计科目），Q9/Q10=存款归属核对调整额）
-ADJ_CELLS = {'c1': (7, 'Q'), 'c2': (8, 'Q'), 'c3': (9, 'Q'), 'c4': (10, 'Q')}
+# 调整值所在行：7~10 行依次为 c1/c2（个人侧净调整额，会计科目）
+# 与 c3/c4（存款归属核对调整额），列位见 layout['note']。
+ADJ_ROWS = {'c1': 7, 'c2': 8, 'c3': 9, 'c4': 10}
+
+
+def detect_template_layout(get_value):
+    """
+    按表头文字识别主表各数据块所在列（兼容旧版/新版附5模板）。
+
+    识别依据（模板第 4~6 行的表头文字）：
+      · 「存款归属核对」区块 → 子项代码列、本金（金额）列
+      · 「会计科目核对」区块 → 本金/利息各一组 代码/科目名称/金额 列、合计列
+      · 「被保险存款申报表」区块 → 本金/利息/合计列
+      · 「差额说明」列 → 调整值 c1~c4 所在列
+
+    参数:
+        get_value (callable): get_value(row, col) → 单元格值（1-indexed）
+
+    返回:
+        dict: 各数据块的列字母（键见 DEFAULT_LAYOUT）；
+              识别失败时回退为旧版模板列位（DEFAULT_LAYOUT）
+    """
+    layout = dict(DEFAULT_LAYOUT)
+
+    def text(r, c):
+        v = get_value(r, c)
+        return str(v).strip() if v is not None else ''
+
+    def find_in_row(row, keyword, start, end):
+        for c in range(start, end + 1):
+            if keyword in text(row, c):
+                return c
+        return None
+
+    def find_exact(row, keyword, start, end):
+        for c in range(start, end + 1):
+            if text(row, c) == keyword:
+                return c
+        return None
+
+    try:
+        # ---- 1) 第 4 行：四个区块的起始列 ----
+        dep_start = find_in_row(4, '存款归属', 1, 40)
+        acct_start = find_in_row(4, '会计科目核对', 1, 40)
+        irp_start = find_in_row(4, '被保险存款申报表', 1, 40)
+        note_start = find_in_row(4, '差额说明', 1, 40)
+        if not (dep_start and acct_start and irp_start and note_start):
+            return layout
+        if not (dep_start < acct_start < irp_start <= note_start):
+            return layout
+
+        # ---- 2) 存款归属：子项代码列 + 本金金额列 ----
+        code_col = None
+        for r in (5, 6):
+            code_col = find_in_row(r, '子项代码', dep_start, acct_start - 1)
+            if code_col:
+                break
+        amount_col = None
+        for r in (6, 5):
+            amount_col = find_exact(r, '本金', dep_start, acct_start - 1)
+            if amount_col:
+                break
+        if code_col:
+            layout['dep_code'] = get_column_letter(code_col)
+            layout['dep_name'] = get_column_letter(code_col + 1)
+        if amount_col:
+            layout['dep_amount'] = get_column_letter(amount_col)
+
+        # ---- 3) 会计科目核对：本金/利息两组 代码/科目名称/金额 ----
+        codes, names, amounts = [], [], []
+        for c in range(acct_start, irp_start):
+            v = text(6, c)
+            if '代码' in v:
+                codes.append(c)
+            elif '科目名称' in v:
+                names.append(c)
+            elif '金额' in v:
+                amounts.append(c)
+        if len(codes) >= 2 and len(names) >= 2 and len(amounts) >= 2:
+            layout['acct_p_code'] = get_column_letter(codes[0])
+            layout['acct_i_code'] = get_column_letter(codes[1])
+            layout['acct_p_name'] = get_column_letter(names[0])
+            layout['acct_i_name'] = get_column_letter(names[1])
+            layout['acct_p_amount'] = get_column_letter(amounts[0])
+            layout['acct_i_amount'] = get_column_letter(amounts[1])
+        total_col = find_exact(5, '合计', acct_start, irp_start - 1)
+        if total_col:
+            layout['acct_total'] = get_column_letter(total_col)
+
+        # ---- 4) IRP001：本金 / 利息 / 合计 ----
+        irp_p = find_exact(5, '本金', irp_start, note_start - 1)
+        irp_i = find_exact(5, '利息', irp_start, note_start - 1)
+        irp_t = find_exact(5, '合计', irp_start, note_start - 1)
+        if irp_p:
+            layout['irp_p'] = get_column_letter(irp_p)
+        if irp_i:
+            layout['irp_i'] = get_column_letter(irp_i)
+        if irp_t:
+            layout['irp_total'] = get_column_letter(irp_t)
+
+        # ---- 5) 差额说明列（调整值 c1~c4 所在列） ----
+        layout['note'] = get_column_letter(note_start)
+    except Exception:
+        return dict(DEFAULT_LAYOUT)
+
+    # 列序校验：识别结果必须保持 存款归属 < 会计科目 < IRP001 < 说明列
+    order = [
+        'dep_code', 'dep_amount', 'acct_p_code', 'acct_p_name',
+        'acct_p_amount', 'acct_i_code', 'acct_i_name', 'acct_i_amount',
+        'acct_total', 'irp_p', 'irp_i', 'irp_total', 'note',
+    ]
+    idx = [column_index_from_string(layout[k]) for k in order]
+    return layout if idx == sorted(idx) else dict(DEFAULT_LAYOUT)
 
 # ------------------------------------------------------------
 # 调整项取值范围
@@ -695,48 +821,65 @@ class BaseChecker:
         ws_main = wb[MAIN_SHEET_NAME] if MAIN_SHEET_NAME in wb.sheetnames else wb.active
         ws_check = wb[CHECK_SHEET_NAME] if CHECK_SHEET_NAME in wb.sheetnames else None
 
+        # ---------- 模板列布局识别（新旧附5模板自适应） ----------
+        layout = detect_template_layout(
+            lambda r, c: ws_main.cell(r, c).value)
+        self.layout = layout
+        col = {k: column_index_from_string(v) for k, v in layout.items()}
+        self.messages.append(
+            "模板布局: 存款归属{}/会计科目{}+{}/IRP001{}/说明列{}"
+            .format(layout['dep_amount'], layout['acct_p_amount'],
+                    layout['acct_i_amount'], layout['irp_p'], layout['note']))
+
         # ---------- Step 1: 解析模板结构 ----------
         rows_data = {}   # 行号 -> 该行结构信息
         formulas = {}    # (列字母, 行号) -> 公式文本
         for r in range(1, ws_main.max_row + 1):
             info = {
-                'f_code': _clean_code(ws_main.cell(r, 3).value),   # C列 子项代码
-                'f_name': _text(ws_main.cell(r, 4).value),         # D列 子项名称
-                'sign': _text(ws_main.cell(r, 5).value),           # E列 符号
-                'p_code': _clean_code(ws_main.cell(r, 7).value),   # G列 科目本金代码
-                'p_name': _text(ws_main.cell(r, 8).value),         # H列 科目名称
-                'i_code': _clean_code(ws_main.cell(r, 10).value),  # J列 利息代码
-                'i_name': _text(ws_main.cell(r, 11).value),        # K列 科目名称
-                'b_name': _text(ws_main.cell(r, 2).value),         # B列 行列名称
+                'f_code': _clean_code(ws_main.cell(r, col['dep_code']).value),
+                'f_name': _text(ws_main.cell(r, col['dep_name']).value),
+                'sign': '',
+                'p_code': _clean_code(ws_main.cell(r, col['acct_p_code']).value),
+                'p_name': _text(ws_main.cell(r, col['acct_p_name']).value),
+                'i_code': _clean_code(ws_main.cell(r, col['acct_i_code']).value),
+                'i_name': _text(ws_main.cell(r, col['acct_i_name']).value),
+                'b_name': _text(ws_main.cell(r, 2).value),   # B列 行列名称
             }
             rows_data[r] = info
-            for col in FORMULA_COLUMNS:
-                v = ws_main.cell(r, column_index_from_string(col)).value
+
+        # 读取主表全部公式（列位随模板变化，不再按固定列清单读取）
+        for r in range(1, ws_main.max_row + 1):
+            for c in range(1, ws_main.max_column + 1):
+                v = ws_main.cell(r, c).value
                 if isinstance(v, str) and v.strip().startswith('='):
-                    formulas[(col, r)] = v.strip()
+                    formulas[(get_column_letter(c), r)] = v.strip()
 
         # ---------- Step 2: 明细行取数 ----------
         values = {}
         filled_f = filled_i = filled_l = 0
 
-        # 存款归属（F 列）：按子项代码从 A1411/A2411 取数（万元）
+        # 存款归属（本金列）：按子项代码从 A1411/A2411 取数（万元）
         for r, info in rows_data.items():
             if _is_sub_code(info['f_code']):
-                values[('F', r)] = round(self.lookup_monthly(info['f_code']), 2)
+                values[(layout['dep_amount'], r)] = round(
+                    self.lookup_monthly(info['f_code']), 2)
                 filled_f += 1
 
-        # 会计科目（I/L 列）：按科目代码从科目余额表取数（元）
+        # 会计科目（本金/利息金额列）：按科目代码从科目余额表取数（元）
         for r, info in rows_data.items():
             if info['p_code'] and info['p_code'].isdigit():
-                values[('I', r)] = round(self.lookup_acct(info['p_code']), 2)
+                values[(layout['acct_p_amount'], r)] = round(
+                    self.lookup_acct(info['p_code']), 2)
                 filled_i += 1
             if info['i_code'] and info['i_code'].isdigit():
-                values[('L', r)] = round(self.lookup_acct(info['i_code']), 2)
+                values[(layout['acct_i_amount'], r)] = round(
+                    self.lookup_acct(info['i_code']), 2)
                 filled_l += 1
 
         self.messages.append(
-            f"明细取数: 存款归属(F)={filled_f}行, 科目本金(I)={filled_i}行, "
-            f"科目利息(L)={filled_l}行")
+            f"明细取数: 存款归属({layout['dep_amount']})={filled_f}行, "
+            f"科目本金({layout['acct_p_amount']})={filled_i}行, "
+            f"科目利息({layout['acct_i_amount']})={filled_l}行")
 
         # ----- 调整项（可自定义的项目列表）-----
         # 会计科目核对类项目 → 汇总后叠加到对应合计项（见 Step 3b）
@@ -758,49 +901,53 @@ class BaseChecker:
         for text in self._adjustment_log_lines():
             self.messages.append(text)
 
-        # 高级管理人员存款（附件4）：定位"高级管理人员"明细行填入 I/L。
-        # 注意模板中既有汇总行（I11=I109，带公式）也有明细行（R109），
-        # 只填明细行，避免覆盖汇总公式。
+        # 高级管理人员存款（附件4）：定位"高级管理人员"明细行填入会计科目金额列。
+        # 注意模板中既有汇总行（带公式）也有明细行，只填明细行，避免覆盖汇总公式。
         if self.att4_p is not None:
             target = None
             for r, info in rows_data.items():
                 if ('高级管理人员' in info['p_name'] or '高级管理人员' in info['i_name']) \
-                        and ('I', r) not in formulas:
+                        and (layout['acct_p_amount'], r) not in formulas:
                     target = r
                     break
             if target is None:
                 self.messages.append("  ⚠ 未找到「高级管理人员」明细行，附件4 未填入")
             else:
-                values[('I', target)] = round(self.att4_p, 2)
-                values[('L', target)] = round(self.att4_i or 0.0, 2)
+                values[(layout['acct_p_amount'], target)] = round(self.att4_p, 2)
+                values[(layout['acct_i_amount'], target)] = round(
+                    self.att4_i or 0.0, 2)
                 self.messages.append(f"高级管理人员存款 (R{target}): 按附件4填入")
 
-        # IRP001（N/O 列）：按行标签匹配申报表项目
+        # IRP001（本金/利息列）：按行标签匹配申报表项目
         for r, info in rows_data.items():
             name = info['p_name']
             if not name:
                 continue
             for kw, section, item in IRP001_ITEM_KEYS:
                 if kw in name:
-                    values[('N', r)] = self.irp001_p.get((section, item), 0.0)
-                    values[('O', r)] = self.irp001_i.get((section, item), 0.0)
+                    values[(layout['irp_p'], r)] = self.irp001_p.get(
+                        (section, item), 0.0)
+                    values[(layout['irp_i'], r)] = self.irp001_i.get(
+                        (section, item), 0.0)
                     break
 
-        # 调整值写入 Q 列（差额说明列的前四格）：既是表格内容，
-        # 也是校验页公式（存款归属 vs IRP001）的输入项
-        #   Q7/Q8 = 个人侧净调整额（会计科目：本金 / 应付利息）
-        #   Q9/Q10 = 存款归属核对时从 IRP001 本金中扣减的净额（个人 / 单位）
+        # 调整值写入"差额说明"列前四格（旧模板 Q7~Q10，新模板 P7~P10）：
+        # 既是表格内容，也是校验页公式（存款归属 vs IRP001）的输入项
+        #   c1/c2 = 个人侧净调整额（会计科目：本金 / 应付利息）
+        #   c3/c4 = 存款归属核对时从 IRP001 本金中扣减的净额（个人 / 单位）
         q_values = {
             'c1': acct_adj.get(('个人存款', '本金'), 0.0),
             'c2': acct_adj.get(('个人存款', '应付利息'), 0.0),
             'c3': dep_adj.get('个人存款', 0.0),
             'c4': dep_adj.get('单位存款', 0.0),
         }
-        # 写入位置：Q9/Q10 优先取校验页公式实际引用的 Q 单元格（模板驱动），
-        # 未引用时回退默认位置；Q7/Q8 为附件5 口径的个人侧净调整额（信息项）
-        adj_cells = dict(ADJ_CELLS)
+        # 写入位置：c3/c4 优先取校验页公式实际引用的说明列单元格（模板驱动），
+        # 未引用时回退默认行；c1/c2 为附件5 口径的个人侧净调整额（信息项）
+        adj_cells = {key: (row, layout['note']) for key, row in ADJ_ROWS.items()}
         if ws_check is not None:
-            q_ref_re = re.compile(r"Q\$?(\d+)")
+            note_ref_re = re.compile(
+                r"(?<![A-Za-z0-9])" + re.escape(layout['note'])
+                + r"\$?(\d+)(?![0-9])")
             for r in range(1, ws_check.max_row + 1):
                 label = str(ws_check.cell(r, 1).value or '')
                 if '个人存款' in label:
@@ -812,16 +959,16 @@ class BaseChecker:
                 for c in range(2, ws_check.max_column + 1):
                     v = ws_check.cell(r, c).value
                     if isinstance(v, str) and v.strip().startswith('='):
-                        m = q_ref_re.search(v)
+                        m = note_ref_re.search(v)
                         if m:
-                            adj_cells[key] = (int(m.group(1)), 'Q')
+                            adj_cells[key] = (int(m.group(1)), layout['note'])
                             break
-        for key, (row, col) in adj_cells.items():
-            values[(col, row)] = round(q_values[key], 2)
+        for key, (row, col_letter) in adj_cells.items():
+            values[(col_letter, row)] = round(q_values[key], 2)
 
         # ---------- Step 3: 按模板公式计算合并 ----------
-        # 所有公式（存款归属列 F、会计科目列 I/L/M、IRP001 列 N/O/P 与
-        # 校验页）均来自模板，程序不内置任何公式
+        # 所有公式（含存款归属/会计科目/IRP001 三块与校验页）均来自模板，
+        # 程序不内置任何计算公式
         all_formulas = dict(formulas)
 
         # 存款归属核对不支持"合计项"调整，提示忽略
@@ -848,8 +995,10 @@ class BaseChecker:
 
         # ---- 3c) 写入"调整项"行展示值（等于已叠加的调整额，供与附件5 对照）----
         for target, r in adj_rows.items():
-            values[('I', r)] = round(row_vals.get((target, '本金'), 0.0), 2)
-            values[('L', r)] = round(row_vals.get((target, '应付利息'), 0.0), 2)
+            values[(layout['acct_p_amount'], r)] = round(
+                row_vals.get((target, '本金'), 0.0), 2)
+            values[(layout['acct_i_amount'], r)] = round(
+                row_vals.get((target, '应付利息'), 0.0), 2)
 
         # ---------- 校验页（差额）计算 ----------
         check_msgs = []
@@ -985,14 +1134,16 @@ class BaseChecker:
         """
         清空模板中遗留的"差额说明"文字（模板示例来自其他机构，直接沿用会误导）。
 
-        仅清空 Q 列第 7 行起的文字；Q7~Q10 的调整值不受影响。
+        仅清空"差额说明"列第 7 行起的文字；第 7~10 行的调整值不受影响。
         """
+        note_idx = column_index_from_string(self.layout['note'])
+        adj_rows = set(ADJ_ROWS.values())
         cleared = []
         for row in range(7, ws_main.max_row + 1):
-            if row in (7, 8, 9, 10):      # Q7~Q10 为调整值
+            if row in adj_rows:      # 第 7~10 行为调整值
                 continue
             try:
-                r, c = _resolve_merged(ws_main, row, 17)
+                r, c = _resolve_merged(ws_main, row, note_idx)
             except Exception:
                 continue
             cell = ws_main.cell(r, c)
@@ -1004,7 +1155,8 @@ class BaseChecker:
             self.messages.append(
                 "已清空模板遗留的差额说明文字（第 " +
                 "、".join(str(r) for r in cleared) +
-                " 行 Q 列）——模板中的说明来自其他机构，请按本期实际差异填写")
+                f" 行 {self.layout['note']} 列）——模板中的说明来自其他机构，"
+                "请按本期实际差异填写")
 
     def _eval_formula_pass(self, values, formulas):
         """
@@ -1043,8 +1195,10 @@ class BaseChecker:
             set[tuple]: 被调整的单元格 {(列, 行)}
         """
         adjusted = {}
+        layout = self.layout
         for (target, field), net in sorted(acct_adj.items()):
-            col = 'I' if field == '本金' else 'L'
+            col = (layout['acct_p_amount'] if field == '本金'
+                   else layout['acct_i_amount'])
             row = total_rows.get(target)
             if not net:
                 continue
@@ -1067,14 +1221,13 @@ class BaseChecker:
                 f"{abs(net):,.2f} = 最终 {base + net:,.2f}（第{row}行{col}列）")
         return set(adjusted)
 
-    @staticmethod
-    def _find_total_rows(rows_data, formulas, ws_check=None):
+    def _find_total_rows(self, rows_data, formulas, ws_check=None):
         """
         定位各"合计项"所在的会计科目合计行。
 
         优先从**模板的校验页公式**推导（模板驱动）：校验页每行 A 列是项目
-        名称，右侧公式形如 IF(核对表!I7=核对表!N7,0,1)，其中引用的主表
-        I 列单元格即该项目的会计科目合计行；
+        名称，右侧公式形如 IF(核对表!H7=核对表!M7,0,1)，其中引用的主表
+        会计科目本金金额列单元格即该项目的会计科目合计行；
         校验页缺失或结构变化时，回退按会计科目名称关键词匹配
         （ADJ_TOTAL_KEYWORDS）。
 
@@ -1086,6 +1239,7 @@ class BaseChecker:
         返回:
             dict: {合计项名称: 行号}
         """
+        p_col = self.layout['acct_p_amount']
         out = {}
         if ws_check is not None:
             ref_re = re.compile(r"!\$?([A-Za-z]{1,3})\$?(\d+)")
@@ -1105,10 +1259,10 @@ class BaseChecker:
                     if not (isinstance(v, str) and v.strip().startswith('=')):
                         continue
                     for m in ref_re.finditer(v):
-                        if m.group(1).upper() != 'I':
+                        if m.group(1).upper() != p_col:
                             continue
                         row = int(m.group(2))
-                        if ('I', row) in formulas:
+                        if (p_col, row) in formulas:
                             out.setdefault(target, row)
                             break
 
@@ -1117,19 +1271,18 @@ class BaseChecker:
                 continue
             for r, info in sorted(rows_data.items()):
                 name = info['p_name'] or info['i_name']
-                if kw in name and ('I', r) in formulas:
+                if kw in name and (p_col, r) in formulas:
                     out[target] = r
                     break
         return out
 
-    @staticmethod
-    def _check_formula_gaps(all_formulas, rows_data, formulas):
+    def _check_formula_gaps(self, all_formulas, rows_data, formulas):
         """
-        检查存款归属公式（F 列）是否引用了"没有数据来源"的行。
+        检查存款归属公式（本金金额列）是否引用了"没有数据来源"的行。
 
-        工具只按模板中的子项代码（C 列）取数；若公式引用了既无子项代码
-        又无公式的行（例如财政性拆分行没写在公式引用的行上），该处取数为
-        0，这里提示使用者修改模板，而不是由程序自行补数。
+        工具只按模板中的子项代码（存款归属代码列）取数；若公式引用了既无
+        子项代码又无公式的行（例如财政性拆分行没写在公式引用的行上），
+        该处取数为 0，这里提示使用者修改模板，而不是由程序自行补数。
         会计科目列与 IRP001 列的空行属正常（历史值行、调整项行、
         高管/不予保险行、对方申报表数据行），不在此检查。
 
@@ -1141,16 +1294,17 @@ class BaseChecker:
         返回:
             list[str]: 日志消息
         """
+        dep_col = self.layout['dep_amount']
         msgs = []
         seen = set()
         for key, expr in all_formulas.items():
-            if key[0] != 'F':      # 只检查存款归属列：会计科目/IRP001 列的空行属正常
+            if key[0] != dep_col:      # 只检查存款归属列
                 continue
             for ref in _formula_refs(expr):
                 if ref in formulas or ref in seen:
                     continue
                 col, row = ref
-                if col != 'F':
+                if col != dep_col:
                     continue
                 info = rows_data.get(row) or {}
                 if _is_sub_code(info.get('f_code') or ''):
@@ -1186,22 +1340,28 @@ class BaseChecker:
         """
         在表内写批注：调整项明细。
 
-        写入位置：会计科目"调整项"行（I/L 列）与存款归属调整值 Q9/Q10；
-        模板原有批注（口径说明）保留，明细追加在其后。
+        写入位置：会计科目"调整项"行（本金/利息金额列）与存款归属调整值
+        （"差额说明"列第 9/10 行）；模板原有批注（口径说明）保留，明细追加其后。
 
         参数:
             ws_main: openpyxl Worksheet
             adj_rows (dict): {'个人存款': 行号, '单位存款': 行号}
         """
+        layout = self.layout
+        p_name_idx = column_index_from_string(layout['acct_p_name'])
+        i_name_idx = column_index_from_string(layout['acct_i_name'])
+        p_amt_idx = column_index_from_string(layout['acct_p_amount'])
+        i_amt_idx = column_index_from_string(layout['acct_i_amount'])
+        note_idx = column_index_from_string(layout['note'])
         items = normalize_adjustments(self.adjustments)
         for target, r in adj_rows.items():
             sign_note = ('（个人合计 SUM 累加该行，故填应加进个人的金额）'
                          if target == '个人存款'
                          else '（模板公式对该行做扣减，故填应从单位扣减的金额）')
             # 模板若缺少该行名称，则在输出中补上（便于阅读与后续校验定位）
-            name_cols = ((8, '个体工商户调整项（本金）', 9),
-                         (11, '个体工商户调整项（应付利息）', 12))
-            for name_col, base_name, _ in name_cols:
+            name_cols = ((p_name_idx, '个体工商户调整项（本金）'),
+                         (i_name_idx, '个体工商户调整项（应付利息）'))
+            for name_col, base_name in name_cols:
                 r_name, c_name = _resolve_merged(ws_main, r, name_col)
                 if not str(ws_main.cell(r_name, c_name).value or '').strip():
                     sign = '（＋）' if target == '个人存款' else '（－）'
@@ -1209,18 +1369,19 @@ class BaseChecker:
                     self.messages.append(
                         f"  第{r}行模板缺少调整项名称，已在输出中补为"
                         f"「{base_name + sign}」")
-            for col_idx, field, scope in ((9, '本金', ADJ_SCOPE_ACCT),
-                                          (12, '应付利息', ADJ_SCOPE_ACCT)):
+            for col_idx, field, scope in ((p_amt_idx, '本金', ADJ_SCOPE_ACCT),
+                                          (i_amt_idx, '应付利息', ADJ_SCOPE_ACCT)):
                 detail = describe_adjustments(items, scope=scope, target=target,
                                               field=field)
                 if detail:
                     _append_comment(ws_main, r, col_idx,
                                     f"取值＝{target}·{field} 调整项合计{sign_note}：\n{detail}")
-        for target, row in (('个人存款', 9), ('单位存款', 10)):
+        for target, row in (('个人存款', ADJ_ROWS['c3']),
+                            ('单位存款', ADJ_ROWS['c4'])):
             detail = describe_adjustments(items, scope=ADJ_SCOPE_DEP,
                                           target=target)
             if detail:
-                _append_comment(ws_main, row, 17,
+                _append_comment(ws_main, row, note_idx,
                                 f"存款归属核对调整（从 IRP001 本金中按方式增减）：\n{detail}")
 
     # ----------------------------------------------------------
@@ -1331,9 +1492,10 @@ def read_adjustments(filepath):
     """
     从《保费基数核对表》（如银行报送的附件5）读取调整值 c1~c4。
 
-    调整值存放在主表 Q 列（差额说明列）的前四格：
-      Q7=c1 个体工商户本金、Q8=c2 个体工商户利息、
-      Q9=c3 个人久悬户、Q10=c4 单位久悬户。
+    调整值存放在主表"差额说明"列（旧模板 Q 列 / 新模板 P 列）的前四格：
+      第7行=c1 个体工商户本金、第8行=c2 个体工商户利息、
+      第9行=c3 个人久悬户、第10行=c4 单位久悬户。
+    列位按表头文字自动识别，新旧模板均适用。
 
     参数:
         filepath (str): 保费基数核对表路径（.xls / .xlsx 均可）
@@ -1348,10 +1510,13 @@ def read_adjustments(filepath):
                                else names[0])
     except Exception:
         return None
+    layout = detect_template_layout(
+        lambda r, c: ws.cell_value(r - 1, c - 1))
+    note_idx = column_index_from_string(layout['note']) - 1   # 0-indexed
     out = {}
-    for key, row in (('c1', 7), ('c2', 8), ('c3', 9), ('c4', 10)):
+    for key, row in ADJ_ROWS.items():
         try:
-            out[key] = to_float(ws.cell_value(row - 1, 16))   # Q 列 = 第17列
+            out[key] = to_float(ws.cell_value(row - 1, note_idx))
         except (IndexError, ValueError):
             out[key] = 0.0
     return out if any(out.values()) else None
