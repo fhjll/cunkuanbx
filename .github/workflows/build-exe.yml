@@ -158,8 +158,9 @@ jobs:
           mkdir -p release
           cp "使用说明（简易版）.txt" "pkg/win7-x64/" 2>/dev/null || true
           cp "使用说明（简易版）.txt" "pkg/win7-x86/" 2>/dev/null || true
-          (cd pkg/win7-x64 && zip -r "../../release/存保审核工具_Win7_x64.zip" .)
-          (cd pkg/win7-x86 && zip -r "../../release/存保审核工具_Win7_x86.zip" .)
+          (cd pkg/win7-x64 && zip -r "../../release/CunBaoTool_Win7_x64.zip" .)
+          (cd pkg/win7-x86 && zip -r "../../release/CunBaoTool_Win7_x86.zip" .)
+          (cd release && sha256sum *.zip > SHA256SUMS.txt)
           ls -lh release
 
       - name: Publish release assets
@@ -172,4 +173,11 @@ jobs:
               --title "存保审核工具 最新自动构建（Win7 x64 / x86）" \
               --notes "由 GitHub Actions 自动构建的 Windows 7 64 位 / 32 位可执行程序（内含模板与使用说明）。每次 push 后覆盖更新。" \
               --prerelease
-          gh release upload ci-latest release/*.zip --clobber
+          # 清掉旧版本/旧文件名的资产，保证 Release 里只有本次产物
+          for asset in $(gh release view ci-latest --json assets -q '.assets[].name'); do
+            case "$asset" in
+              CunBaoTool_*.zip|SHA256SUMS.txt) ;;
+              *) gh release delete-asset ci-latest "$asset" -y || true ;;
+            esac
+          done
+          gh release upload ci-latest release/*.zip release/SHA256SUMS.txt --clobber
