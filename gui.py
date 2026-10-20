@@ -7,7 +7,7 @@
 程序入口与主界面。
 
 界面布局（从上到下，单页面可滚动）：
-  第〇部分 — 机构类型选择（银行类型下拉框）
+  第〇部分 — 银行类型 / 模板绑定（独立模块 bank_selector.BankSelector）
   第一部分 — 工作目录（文件夹路径 + 文件匹配状态表格）
   第二部分 — 调整值设置（可自由增删的调整项表格）
   第三部分 — 操作按钮（3个主要操作按钮 + 进度条）
@@ -35,17 +35,16 @@
   - PyQt5：图形界面框架
   - base_checker.py：保费基数核对表生成引擎（合并模板）
   - validator.py：数据校验引擎
-  - bank_config.py：银行类型配置
+  - bank_manager.py：银行类型 ↔ 模板绑定的持久化配置（新增）
+  - bank_selector.py：银行选择 / 模板绑定界面（独立模块，新增）
+  - bank_config.py：内置模板路径配置（仅保留默认值）
   - common.py：公共工具
 =============================================================================
 """
 import sys
 import os
-import re
 import glob
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -53,7 +52,6 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog,
     QGroupBox, QMessageBox, QProgressBar, QScrollArea, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView,
-    QDialog, QDialogButtonBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -66,10 +64,8 @@ from base_checker import (BaseChecker, read_adjustments,
 from validator import (
     validate_irp002, validate_base_check_vs_irp001,
     generate_validation_report)
-from bank_config import (get_bank_list, get_template, DEFAULT_BANK,
-                         WORK_TEMPLATE_DIR, install_template_copy,
-                         resolve_template, template_candidates,
-                         work_template_path)
+from bank_manager import BankManager
+from bank_selector import BankSelector
 
 
 # 脚本所在目录（也是默认工作目录）
@@ -240,253 +236,6 @@ def scan_folder(folder):
 
 
 # ============================================================
-# 打开文件 / 文件夹（系统默认程序）
-# ============================================================
-
-def _open_with_default_app(path):
-    """
-    用系统默认程序打开文件（如 Excel / WPS）。
-
-    参数:
-        path (str): 文件路径
-    """
-    path = str(path)
-    if sys.platform.startswith('darwin'):
-        subprocess.Popen(['open', path])
-    elif os.name == 'nt':
-        os.startfile(path)          # noqa: S606 (Windows 专用)
-    else:
-        subprocess.Popen(['xdg-open', path])
-
-
-def _show_in_file_manager(path):
-    """
-    在系统文件管理器中定位文件（或打开目录）。
-
-    参数:
-        path (str): 文件或目录路径
-    """
-    path = str(path)
-    if os.path.isfile(path):
-        if sys.platform.startswith('darwin'):
-            subprocess.Popen(['open', '-R', path])
-        elif os.name == 'nt':
-            subprocess.Popen(['explorer', '/select,' + path])
-        else:
-            subprocess.Popen(['xdg-open', os.path.dirname(path)])
-    else:
-        _open_with_default_app(path)
-
-
-# ============================================================
-# 模板修改窗口
-# ============================================================
-
-class TemplateDialog(QDialog):
-    """
-    模板修改窗口。
-
-    显示当前机构类型模板的实际位置与候选路径，可：
-      · 打开实际使用的模板（系统默认程序，如 Excel/WPS 编辑）
-      · 复制模板到工作目录「模板」子目录后再打开（便于长期修改；
-        打包运行时内置模板在临时目录，改那里不生效）
-      · 用内置模板重置工作目录模板
-      · 打开模板所在文件夹
-    模板按 工作目录/模板 → 程序目录/templates → 内置模板 的顺序生效，
-    改完保存后重新执行「生成保费基数核对表」即使用新模板。
-    """
-
-    def __init__(self, parent, bank_name, rel_path, work_dir, log_cb=None):
-        """
-        参数:
-            parent: 父窗口
-            bank_name (str): 当前机构类型名称
-            rel_path (str): 模板相对路径（bank_config 中的配置值）
-            work_dir (str): 当前工作目录
-            log_cb (callable, optional): 写主窗口日志的回调
-        """
-        super().__init__(parent)
-        self.setWindowTitle("模板修改")
-        self.setMinimumSize(760, 420)
-        self.bank_name = bank_name
-        self.rel_path = rel_path
-        self.work_dir = work_dir or ''
-        self.log_cb = log_cb or (lambda msg: None)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        title = QLabel(f"机构类型：{bank_name}    模板文件：{os.path.basename(rel_path)}")
-        title.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        layout.addWidget(title)
-
-        tip = QLabel(
-            "模板按以下顺序生效（前者优先）：①工作目录「模板」子目录 ②程序目录 templates "
-            "③程序内置模板。\n若要长期修改，请用「复制到工作目录并打开」——程序内置模板"
-            "打包在程序内部（临时目录），改那里不会保留。\n修改并保存模板后，"
-            "重新执行「生成保费基数核对表」即生效；模板里的行结构、科目代码与公式"
-            "决定取数与计算口径。")
-        tip.setWordWrap(True)
-        tip.setFont(QFont("Microsoft YaHei", 8))
-        tip.setStyleSheet("color:#555;")
-        layout.addWidget(tip)
-
-        self.tb = QTableWidget(0, 3)
-        self.tb.setHorizontalHeaderLabels(['来源', '路径', '状态'])
-        self.tb.setFont(QFont("Microsoft YaHei", 9))
-        self.tb.verticalHeader().setDefaultSectionSize(24)
-        self.tb.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tb.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        header = self.tb.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.tb.doubleClicked.connect(lambda *_: self._open_selected())
-        layout.addWidget(self.tb, 1)
-
-        btns = QHBoxLayout()
-        btns.setSpacing(8)
-        for text, slot, tip_text in (
-                ("打开当前模板", self._open_current,
-                 "用系统默认程序打开实际生效的模板"),
-                ("复制到工作目录并打开", self._copy_and_open,
-                 "把模板复制到 <工作目录>/模板/ 后打开编辑（推荐）"),
-                ("用内置模板重置", self._reset_from_builtin,
-                 "用程序内置模板覆盖工作目录模板（恢复到初始版本）"),
-                ("打开所在文件夹", self._open_folder, "在文件管理器中定位模板"),
-                ("刷新", self._reload, "重新检查模板位置")):
-            btn = QPushButton(text)
-            btn.setFont(QFont("Microsoft YaHei", 9))
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip(tip_text)
-            btn.clicked.connect(slot)
-            btns.addWidget(btn)
-        btns.addStretch()
-        layout.addLayout(btns)
-
-        box = QDialogButtonBox(QDialogButtonBox.Close)
-        box.rejected.connect(self.reject)
-        box.accepted.connect(self.accept)
-        layout.addWidget(box)
-
-        self._reload()
-
-    # --------------------------------------------------
-    def _candidates(self):
-        """候选模板列表（含存在状态）"""
-        return [(label, path, os.path.exists(path))
-                for label, path in template_candidates(self.rel_path, self.work_dir)]
-
-    def _effective(self):
-        """当前实际生效的模板 (path, label)"""
-        return resolve_template(self.rel_path, self.work_dir)
-
-    def _reload(self):
-        """刷新候选列表"""
-        eff_path, eff_label = self._effective()
-        rows = self._candidates()
-        self.tb.setRowCount(0)
-        for label, path, exists in rows:
-            r = self.tb.rowCount()
-            self.tb.insertRow(r)
-            self.tb.setItem(r, 0, QTableWidgetItem(label))
-            self.tb.setItem(r, 1, QTableWidgetItem(path))
-            if os.path.abspath(path) == os.path.abspath(eff_path):
-                status = "✓ 使用中" if exists else "（使用中，但文件缺失）"
-            else:
-                status = "存在" if exists else "不存在"
-            item = QTableWidgetItem(status)
-            self.tb.setItem(r, 2, item)
-        self.tb.resizeRowsToContents()
-
-    def _open_selected(self):
-        """双击行：打开该行的模板（存在才打开）"""
-        rows = {i.row() for i in self.tb.selectedIndexes()}
-        if not rows:
-            return
-        r = sorted(rows)[0]
-        path_item = self.tb.item(r, 1)
-        if path_item and os.path.exists(path_item.text()):
-            _open_with_default_app(path_item.text())
-            self.log_cb(f"[模板] 已打开: {path_item.text()}")
-        else:
-            QMessageBox.information(self, "提示", "该位置没有模板文件。")
-
-    def _open_current(self):
-        """打开实际生效的模板"""
-        path, label = self._effective()
-        if not os.path.exists(path):
-            QMessageBox.warning(self, "模板缺失", f"未找到模板文件：\n{path}")
-            return
-        try:
-            _open_with_default_app(path)
-        except Exception as e:
-            QMessageBox.critical(self, "打开失败", str(e))
-            return
-        self.log_cb(f"[模板] 已打开（{label}）: {path}")
-        if label == '内置模板':
-            QMessageBox.information(
-                self, "提示",
-                "当前打开的是程序内置模板（位于程序内部临时目录）。\n"
-                "在此修改不会保留，请改用「复制到工作目录并打开」。")
-
-    def _copy_and_open(self):
-        """复制模板到工作目录并打开"""
-        if not self.work_dir or not os.path.isdir(self.work_dir):
-            QMessageBox.warning(self, "缺少工作目录",
-                                "请先选择有效的工作目录，再复制模板到工作目录。")
-            return
-        target = work_template_path(self.rel_path, self.work_dir)
-        try:
-            if os.path.exists(target):
-                _, src, copied = install_template_copy(self.rel_path, self.work_dir)
-                self.log_cb(f"[模板] 工作目录模板已存在，直接打开: {target}")
-            else:
-                target, src, copied = install_template_copy(self.rel_path, self.work_dir)
-                self.log_cb(f"[模板] 已复制到工作目录: {target}\n"
-                            f"       来源: {src}")
-            _open_with_default_app(target)
-        except Exception as e:
-            QMessageBox.critical(self, "复制/打开失败", str(e))
-            return
-        self._reload()
-
-    def _reset_from_builtin(self):
-        """用内置模板覆盖工作目录模板"""
-        if not self.work_dir or not os.path.isdir(self.work_dir):
-            QMessageBox.warning(self, "缺少工作目录", "请先选择有效的工作目录。")
-            return
-        target = work_template_path(self.rel_path, self.work_dir)
-        if QMessageBox.question(
-                self, "确认重置",
-                f"将用程序内置模板覆盖：\n{target}\n\n"
-                f"（工作目录模板中的修改会丢失）是否继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
-            return
-        try:
-            builtin, _ = resolve_template(self.rel_path, None)   # 不含工作目录时即程序/内置模板
-            if os.path.abspath(builtin) == os.path.abspath(target):
-                QMessageBox.information(self, "提示", "当前生效的就是内置模板，无需重置。")
-                return
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copy2(builtin, target)
-            self.log_cb(f"[模板] 已用内置模板重置工作目录模板: {target}")
-        except Exception as e:
-            QMessageBox.critical(self, "重置失败", str(e))
-            return
-        self._reload()
-
-    def _open_folder(self):
-        """打开模板所在文件夹"""
-        path, _ = self._effective()
-        try:
-            _show_in_file_manager(path)
-            self.log_cb(f"[模板] 已在文件管理器中定位: {path}")
-        except Exception as e:
-            QMessageBox.critical(self, "打开失败", str(e))
-
-
-# ============================================================
 # 后台工作线程
 # ============================================================
 # 说明：耗时操作在 QThread 后台执行，避免 UI 卡顿
@@ -629,7 +378,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 720)
         self.resize(1000, 780)
 
-        self._current_bank = DEFAULT_BANK
+        self.bank_mgr = BankManager()
+        self._current_bank = self.bank_mgr.last_bank
         self._update_template_paths()
         self._apply_style()
         self._setup_ui()
@@ -639,43 +389,40 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _update_template_paths(self):
-        """
-        根据当前银行类型记录模板相对路径，并解析实际生效的模板文件。
-
-        生效顺序：工作目录「模板」子目录 → 程序目录 templates → 程序内置模板。
-        """
-        self.base_tpl_rel = get_template(self._current_bank, 'base_check_template')
-        self.base_tpl_path, self.base_tpl_source = resolve_template(
-            self.base_tpl_rel, self._get_folder() if hasattr(self, 'ed_folder') else None)
+        """按当前银行类型解析其绑定的模板文件。"""
+        info = self.bank_mgr.template_info(self._current_bank)
+        self.base_tpl_path = info.get('path') or ''
+        self.base_tpl_source = info.get('source') or ''
+        self.base_tpl_exists = bool(info.get('exists'))
 
     def _resolve_template(self, log=False):
         """
-        解析当前实际生效的模板（工作目录可能已变化）。
+        解析当前银行类型绑定的模板文件（绑定缺失时回退到默认模板）。
 
         参数:
             log (bool): 是否把结果写入运行日志
 
         返回:
-            tuple: (模板路径, 来源标签)
+            tuple: (模板路径, 来源标签)；模板不存在时路径为空字符串
         """
-        try:
-            folder = self._get_folder()
-        except Exception:
-            folder = None
-        path, source = resolve_template(self.base_tpl_rel, folder)
+        info = self.bank_mgr.template_info(self._current_bank)
+        path = info.get('path') or ''
+        source = info.get('source') or '自定义绑定'
+        if not info.get('exists'):
+            fallback = self.bank_mgr.default_template_path(self._current_bank)
+            if fallback and os.path.isfile(fallback):
+                path, source = fallback, '默认模板（绑定缺失，已回退）'
+                if log:
+                    self._log(
+                        f"[模板] 绑定的模板不存在（{info.get('bound_missing')}），"
+                        f"已回退默认模板: {fallback}")
+            else:
+                path = ''
         self.base_tpl_path, self.base_tpl_source = path, source
-        if log and (path != getattr(self, '_logged_tpl_path', None)):
+        if log and path and path != getattr(self, '_logged_tpl_path', None):
             self._logged_tpl_path = path
             self._log(f"[模板] 使用{source}: {path}")
         return path, source
-
-    def _open_template_dialog(self):
-        """打开模板修改窗口"""
-        self._resolve_template()
-        dlg = TemplateDialog(self, self._current_bank, self.base_tpl_rel,
-                             self._get_folder(), log_cb=self._log)
-        dlg.exec_()
-        self._resolve_template(log=True)
 
     # ----------------------------------------------------------
     # UI 搭建
@@ -703,34 +450,11 @@ class MainWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        # ====== 第〇部分：银行类型选择 ======
-        grp_bank = QGroupBox("机构类型")
-        grp_bank.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        bly = QHBoxLayout(grp_bank)
-        bly.setSpacing(10)
-        bly.addWidget(QLabel("选择银行机构类型:"))
-        from PyQt5.QtWidgets import QComboBox
-        self.cb_bank = QComboBox()
-        self.cb_bank.setFont(QFont("Microsoft YaHei", 10))
-        self.cb_bank.setMinimumHeight(28)
-        self.cb_bank.addItems(get_bank_list())
-        self.cb_bank.setCurrentText(self._current_bank)
-        self.cb_bank.currentTextChanged.connect(self._on_bank_changed)
-        bly.addWidget(self.cb_bank)
-
-        btn_tpl = QPushButton("修改模板…")
-        btn_tpl.setFont(QFont("Microsoft YaHei", 9))
-        btn_tpl.setCursor(Qt.PointingHandCursor)
-        btn_tpl.setToolTip("查看模板位置、打开模板编辑，或复制到工作目录后修改")
-        btn_tpl.clicked.connect(self._open_template_dialog)
-        bly.addWidget(btn_tpl)
-
-        self.lbl_tpl = QLabel("")
-        self.lbl_tpl.setFont(QFont("Microsoft YaHei", 8))
-        self.lbl_tpl.setStyleSheet("color:#555;")
-        bly.addWidget(self.lbl_tpl)
-        bly.addStretch()
-        layout.addWidget(grp_bank)
+        # ====== 第〇部分：银行类型 / 模板绑定（独立界面模块） ======
+        self.bank_selector = BankSelector(self.bank_mgr)
+        self.bank_selector.bank_changed.connect(self._on_bank_changed)
+        self.bank_selector.template_changed.connect(self._on_template_changed)
+        layout.addWidget(self.bank_selector)
 
         # ====== 第一部分：文件夹选取 ======
         grp_folder = QGroupBox("工作目录")
@@ -876,7 +600,6 @@ class MainWindow(QMainWindow):
 
         # 初始扫描
         self._on_folder_changed(BASE_DIR)
-        self._update_tpl_label()
 
     # ----------------------------------------------------------
     # UI 辅助方法
@@ -1015,8 +738,6 @@ class MainWindow(QMainWindow):
         # 调整项：优先载入本目录配置，其次附件5，最后标准项
         self._refresh_adjustments(matches.get('att5', []))
 
-        # 模板来源（工作目录/模板 子目录存在时会切换来源）
-        self._update_tpl_label()
 
     # ----------------------------------------------------------
     # 调整项表格（可自由增删）
@@ -1321,21 +1042,20 @@ class MainWindow(QMainWindow):
             self._set_adjustments(build_default_adjustments())
 
     def _on_bank_changed(self, bank_name):
-        """银行类型切换时更新模板路径"""
+        """银行类型切换时更新模板绑定"""
+        if not bank_name:
+            return
         self._current_bank = bank_name
         self._update_template_paths()
         self._logged_tpl_path = None
         path, source = self._resolve_template(log=True)
-        self._log(f"[切换银行类型] {bank_name}")
-        self._update_tpl_label()
+        self._log(f"[切换银行类型] {bank_name}（模板：{source}）")
 
-    def _update_tpl_label(self):
-        """刷新机构类型区旁的模板来源提示"""
-        if not hasattr(self, 'lbl_tpl'):
-            return
-        path, source = self._resolve_template()
-        self.lbl_tpl.setText(f"模板来源：{source}")
-        self.lbl_tpl.setToolTip(path)
+    def _on_template_changed(self, template_path):
+        """模板绑定被更换后刷新路径并记录日志"""
+        self._update_template_paths()
+        self._logged_tpl_path = None
+        self._resolve_template(log=True)
 
     def _browse_folder(self):
         """弹出文件夹选择对话框"""
@@ -1447,6 +1167,13 @@ class MainWindow(QMainWindow):
         a1411 = self._get_path('a1411')
         a2411 = self._get_path('a2411')
         tpl, tpl_source = self._resolve_template()
+        if not tpl or not os.path.isfile(tpl):
+            QMessageBox.warning(
+                self, "模板缺失",
+                "当前银行类型绑定的模板文件不存在。\n\n"
+                "请点「管理银行/模板…」或「更换绑定模板…」"
+                "重新选择模板文件。")
+            return
         out = self._get_path('base_out')
         att2 = self._get_path('att2')
         att3 = self._get_path('att3')

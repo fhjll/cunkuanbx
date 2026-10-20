@@ -13,3 +13,5 @@ dist/
 测试数据/
 .claude/
 templates/*.xls
+bank_bindings.json
+模板库/
