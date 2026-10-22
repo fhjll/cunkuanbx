@@ -54,8 +54,10 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView,
     QStackedWidget,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QThread, QRect, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPixmap
+
+from common import get_resource_path
 
 from base_checker import (BaseChecker, read_adjustments,
                           build_default_adjustments, normalize_adjustments,
@@ -364,6 +366,98 @@ class ValidationSeqThread(QThread):
 
 
 # ============================================================
+# 启动首页（背景图片 + 开始核查）
+# ============================================================
+
+class HomePage(QWidget):
+    """
+    启动首页：以 bg.jpeg 为背景图。
+
+    背景填充规则：
+      · 图片按原始比例缩放（KeepAspectRatio），不拉伸变形；
+      · 窗口尺寸与图片比例不一致产生的留白，用图片左右边缘的颜色逐行填充，
+        与图片底色自然衔接（图片上下边缘颜色用于窗口更宽/更高时的上下留白）。
+    """
+
+    BG_FILE = 'bg.jpeg'
+    FALLBACK_COLOR = '#e8f1fb'
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bg = QImage()
+        bg_path = get_resource_path(self.BG_FILE)
+        if os.path.isfile(bg_path):
+            self._bg = QImage(bg_path)
+        self._edge_colors = (self._sample_edge_colors(self._bg)
+                             if not self._bg.isNull() else [])
+        self._cache = None
+        self._cache_size = (0, 0)
+
+    @staticmethod
+    def _sample_edge_colors(img):
+        """逐行采样图片左右边缘颜色（用于留白填充）。"""
+        w, h = img.width(), img.height()
+        xs = (0, 1, 2, max(0, w - 3), max(0, w - 2), w - 1)
+        colors = []
+        for y in range(h):
+            r = g = b = 0
+            for x in xs:
+                c = QColor(img.pixel(x, y))
+                r += c.red()
+                g += c.green()
+                b += c.blue()
+            n = len(xs)
+            colors.append(QColor(r // n, g // n, b // n))
+        return colors
+
+    def _build_background(self):
+        """生成与当前窗口等大的背景缓存（避免每次重绘都逐行填充）。"""
+        w, h = max(1, self.width()), max(1, self.height())
+        if self._cache is not None and self._cache_size == (w, h):
+            return self._cache
+
+        pix = QPixmap(w, h)
+        pix.fill(QColor(self.FALLBACK_COLOR))
+        if not self._bg.isNull():
+            p = QPainter(pix)
+            src = self._bg
+            sw, sh = src.width(), src.height()
+            scaled = src.size().scaled(w, h, Qt.KeepAspectRatio)
+            tw, th = scaled.width(), scaled.height()
+            tx, ty = (w - tw) // 2, (h - th) // 2
+
+            # 先用图片左右边缘颜色逐行填充，让留白与图片底色一致
+            if self._edge_colors:
+                for y in range(h):
+                    if y < ty:
+                        sy = 0
+                    elif y >= ty + th:
+                        sy = sh - 1
+                    else:
+                        sy = min(sh - 1, int((y - ty) * sh / max(1, th)))
+                    p.fillRect(0, y, w, 1, self._edge_colors[sy])
+
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            p.drawImage(QRect(tx, ty, tw, th), src)
+            p.end()
+
+        self._cache = pix
+        self._cache_size = (w, h)
+        return pix
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.drawPixmap(0, 0, self._build_background())
+        finally:
+            painter.end()
+
+    def resizeEvent(self, event):
+        self._cache = None
+        super().resizeEvent(event)
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 
@@ -450,80 +544,51 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _build_home_page(self):
-        """构建启动后显示的"存款保险核查"首页。"""
-        page = QWidget()
-        page.setObjectName("homePage")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(48, 40, 48, 32)
-        v.setSpacing(14)
+        """构建启动首页：背景图 + 标题 +「开始核查」「银行类型 / 模板设置…」。"""
+        page = HomePage()
 
-        v.addStretch(2)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(32, 32, 32, 32)
+        outer.addStretch(1)
 
-        title = QLabel("存款保险核查")
+        card = QWidget()
+        card.setObjectName("homeCard")
+        card.setAttribute(Qt.WA_StyledBackground, True)
+        card.setMinimumWidth(580)
+        card.setMaximumWidth(720)
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(44, 36, 44, 36)
+        cv.setSpacing(18)
+
+        title = QLabel("存款保险申报表非现场审核助手")
         title.setAlignment(Qt.AlignCenter)
-        title.setFont(QFont("Microsoft YaHei", 34, QFont.Bold))
+        title.setWordWrap(True)
+        title.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
         title.setStyleSheet("color:#173b66;")
-        v.addWidget(title)
+        cv.addWidget(title)
 
-        subtitle = QLabel("存款保险申报表审核工具")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setFont(QFont("Microsoft YaHei", 15))
-        subtitle.setStyleSheet("color:#5a6b7f;")
-        v.addWidget(subtitle)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color:#c9d8ea;")
-        line.setFixedWidth(360)
-        line_row = QHBoxLayout()
-        line_row.addStretch()
-        line_row.addWidget(line)
-        line_row.addStretch()
-        v.addLayout(line_row)
-
-        desc = QLabel(
-            "把 A1411/A2411 月报表、科目余额表与 IRP001/IRP002 申报数据放到统一的工作目录，\n"
-            "依次生成《保费基数核对表》、执行数据校验、生成《校验表》报告。")
-        desc.setAlignment(Qt.AlignCenter)
-        desc.setWordWrap(True)
-        desc.setFont(QFont("Microsoft YaHei", 11))
-        desc.setStyleSheet("color:#6b7c90;")
-        v.addWidget(desc)
-
-        v.addSpacing(10)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
         self.btn_start = QPushButton("开始核查")
         self.btn_start.setObjectName("startButton")
-        self.btn_start.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
-        self.btn_start.setMinimumSize(300, 64)
+        self.btn_start.setFont(QFont("Microsoft YaHei", 17, QFont.Bold))
+        self.btn_start.setMinimumSize(280, 60)
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self._start_check)
-        btn_row.addWidget(self.btn_start)
-        btn_row.addStretch()
-        v.addLayout(btn_row)
+        cv.addWidget(self.btn_start, 0, Qt.AlignHCenter)
 
-        opt_row = QHBoxLayout()
-        opt_row.addStretch()
         self.btn_home_manage = QPushButton("银行类型 / 模板设置…")
         self.btn_home_manage.setFont(QFont("Microsoft YaHei", 10))
         self.btn_home_manage.setCursor(Qt.PointingHandCursor)
-        self.btn_home_manage.setMinimumHeight(32)
+        self.btn_home_manage.setMinimumHeight(34)
+        self.btn_home_manage.setStyleSheet(
+            "QPushButton { background:#ffffff; color:#1a73e8;"
+            " border:1px solid #1a73e8; border-radius:6px; padding:6px 18px; }"
+            "QPushButton:hover { background:#eef4fd; }"
+            "QPushButton:pressed { background:#e2ecfb; }")
         self.btn_home_manage.clicked.connect(self._home_manage_bank)
-        opt_row.addWidget(self.btn_home_manage)
-        opt_row.addStretch()
-        v.addLayout(opt_row)
+        cv.addWidget(self.btn_home_manage, 0, Qt.AlignHCenter)
 
-        v.addStretch(3)
-
-        self.lbl_home_info = QLabel("")
-        self.lbl_home_info.setAlignment(Qt.AlignCenter)
-        self.lbl_home_info.setFont(QFont("Microsoft YaHei", 9))
-        self.lbl_home_info.setStyleSheet("color:#7d8ea3;")
-        self.lbl_home_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        v.addWidget(self.lbl_home_info)
-
+        outer.addWidget(card, 0, Qt.AlignHCenter)
+        outer.addStretch(1)
         return page
 
     def _update_home_info(self):
@@ -1565,15 +1630,14 @@ class MainWindow(QMainWindow):
             QProgressBar::chunk { background: #0984e3; border-radius: 2px; }
             QScrollArea { border: none; background: transparent; }
             QWidget#innerWidget { background: transparent; }
-            QWidget#homePage {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                            stop:0 #e8f1fb, stop:0.55 #f4f8fd,
-                                            stop:1 #ffffff);
+            QWidget#homeCard {
+                background-color: rgba(255, 255, 255, 208);
+                border-radius: 18px;
             }
             QPushButton#startButton {
                 background-color: #1a73e8; color: white; border: none;
-                border-radius: 10px; font-size: 22px; font-weight: bold;
-                padding: 8px 24px;
+                border-radius: 10px; font-size: 20px; font-weight: bold;
+                padding: 6px 20px;
             }
             QPushButton#startButton:hover { background-color: #1666cc; }
             QPushButton#startButton:pressed { background-color: #1259b3; }

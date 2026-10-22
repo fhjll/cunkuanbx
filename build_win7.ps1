@@ -87,6 +87,7 @@ Write-Host "[..] 开始打包 ..."
 & $python -m PyInstaller --clean --noconfirm --onefile --windowed `
     --name "存保审核工具_Win7_64bit" `
     --add-data "templates;templates" `
+    --add-data "bg.jpeg;." `
     gui.py
 if ($LASTEXITCODE -ne 0) { Fail "打包失败，请查看上方日志。" }
 

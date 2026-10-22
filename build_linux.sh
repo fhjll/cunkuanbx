@@ -38,6 +38,7 @@ echo "开始打包（单文件，内置 templates/ 模板）..."
 "$PYTHON" -m PyInstaller --onefile --noconfirm \
     --name 存保审核工具 \
     --add-data "templates:templates" \
+    --add-data "bg.jpeg:." \
     gui.py
 
 echo

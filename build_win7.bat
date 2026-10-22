@@ -73,6 +73,7 @@ echo [..] 开始打包 ...
 pyinstaller --clean --noconfirm --onefile --windowed ^
     --name 存保审核工具_Win7_64bit ^
     --add-data "templates;templates" ^
+    --add-data "bg.jpeg;." ^
     gui.py
 if errorlevel 1 (
     echo [ERROR] 打包失败，请查看上方日志。
