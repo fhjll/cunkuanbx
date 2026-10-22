@@ -1420,8 +1420,7 @@ class MainWindow(QMainWindow):
                          os.path.exists(irp001_path) else None),
             base_check_path=(base_path if base_path and
                              os.path.exists(base_path) else None),
-            adjustments=adjustments,
-            att5_path=att5_ok)
+            adjustments=adjustments)
         self.thr_all.progress.connect(self._log)
         self.thr_all.finished.connect(self._val_all_done)
         self.thr_all.error.connect(self._val_all_err)
@@ -1496,7 +1495,8 @@ class MainWindow(QMainWindow):
             irp002_path=(irp002_path if os.path.exists(irp002_path) else None),
             base_check_path=(base_path if base_path and
                              os.path.exists(base_path) else None),
-            adjustments=adjustments)
+            adjustments=adjustments,
+            att5_path=att5_ok)
         self.thr_report.progress.connect(self._log)
         self.thr_report.finished.connect(self._report_done)
         self.thr_report.error.connect(self._report_err)
