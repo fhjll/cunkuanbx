@@ -52,6 +52,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog,
     QGroupBox, QMessageBox, QProgressBar, QScrollArea, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView,
+    QStackedWidget,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -289,13 +290,14 @@ class ReportGenThread(QThread):
 
     def __init__(self, irp001_path, output_path,
                  irp002_path=None, base_check_path=None,
-                 adjustments=None):
+                 adjustments=None, att5_path=None):
         super().__init__()
         self.irp001_path = irp001_path
         self.output_path = output_path
         self.irp002_path = irp002_path
         self.base_check_path = base_check_path
         self.adjustments = adjustments or []
+        self.att5_path = att5_path
 
     def run(self):
         try:
@@ -305,7 +307,8 @@ class ReportGenThread(QThread):
                 output_path=self.output_path,
                 irp002_path=self.irp002_path,
                 base_check_path=self.base_check_path,
-                adjustments=self.adjustments)
+                adjustments=self.adjustments,
+                att5_path=self.att5_path)
             self.finished.emit(msgs)
         except Exception as e:
             import traceback
@@ -374,7 +377,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("存款保险申报表审核工具")
+        self.setWindowTitle("存款保险核查")
         self.setMinimumSize(960, 720)
         self.resize(1000, 780)
 
@@ -429,14 +432,148 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _setup_ui(self):
-        """搭建完整界面"""
-        central = QWidget()
-        self.setCentralWidget(central)
+        """搭建界面：启动先显示"存款保险核查"首页，点「开始核查」进入核查功能页。"""
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+        self.home_page = self._build_home_page()
+        self.work_page = self._build_work_page()
+        self.stack.addWidget(self.home_page)      # index 0：首页
+        self.stack.addWidget(self.work_page)      # index 1：核查功能
+        self.stack.setCurrentIndex(0)
 
-        # 外层 ScrollArea 保证单页面可滚动
+        # 初始扫描
+        self._on_folder_changed(BASE_DIR)
+        self._update_home_info()
+
+    # ----------------------------------------------------------
+    # 首页（存款保险核查大界面）
+    # ----------------------------------------------------------
+
+    def _build_home_page(self):
+        """构建启动后显示的"存款保险核查"首页。"""
+        page = QWidget()
+        page.setObjectName("homePage")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(48, 40, 48, 32)
+        v.setSpacing(14)
+
+        v.addStretch(2)
+
+        title = QLabel("存款保险核查")
+        title.setAlignment(Qt.AlignCenter)
+        title.setFont(QFont("Microsoft YaHei", 34, QFont.Bold))
+        title.setStyleSheet("color:#173b66;")
+        v.addWidget(title)
+
+        subtitle = QLabel("存款保险申报表审核工具")
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setFont(QFont("Microsoft YaHei", 15))
+        subtitle.setStyleSheet("color:#5a6b7f;")
+        v.addWidget(subtitle)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color:#c9d8ea;")
+        line.setFixedWidth(360)
+        line_row = QHBoxLayout()
+        line_row.addStretch()
+        line_row.addWidget(line)
+        line_row.addStretch()
+        v.addLayout(line_row)
+
+        desc = QLabel(
+            "把 A1411/A2411 月报表、科目余额表与 IRP001/IRP002 申报数据放到统一的工作目录，\n"
+            "依次生成《保费基数核对表》、执行数据校验、生成《校验表》报告。")
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setWordWrap(True)
+        desc.setFont(QFont("Microsoft YaHei", 11))
+        desc.setStyleSheet("color:#6b7c90;")
+        v.addWidget(desc)
+
+        v.addSpacing(10)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.btn_start = QPushButton("开始核查")
+        self.btn_start.setObjectName("startButton")
+        self.btn_start.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        self.btn_start.setMinimumSize(300, 64)
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.clicked.connect(self._start_check)
+        btn_row.addWidget(self.btn_start)
+        btn_row.addStretch()
+        v.addLayout(btn_row)
+
+        opt_row = QHBoxLayout()
+        opt_row.addStretch()
+        self.btn_home_manage = QPushButton("银行类型 / 模板设置…")
+        self.btn_home_manage.setFont(QFont("Microsoft YaHei", 10))
+        self.btn_home_manage.setCursor(Qt.PointingHandCursor)
+        self.btn_home_manage.setMinimumHeight(32)
+        self.btn_home_manage.clicked.connect(self._home_manage_bank)
+        opt_row.addWidget(self.btn_home_manage)
+        opt_row.addStretch()
+        v.addLayout(opt_row)
+
+        v.addStretch(3)
+
+        self.lbl_home_info = QLabel("")
+        self.lbl_home_info.setAlignment(Qt.AlignCenter)
+        self.lbl_home_info.setFont(QFont("Microsoft YaHei", 9))
+        self.lbl_home_info.setStyleSheet("color:#7d8ea3;")
+        self.lbl_home_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.lbl_home_info)
+
+        return page
+
+    def _update_home_info(self):
+        """刷新首页上的当前银行类型 / 绑定模板信息。"""
+        if not hasattr(self, "lbl_home_info"):
+            return
+        info = self.bank_mgr.template_info(self._current_bank)
+        path = info.get("path") or ""
+        name = os.path.basename(path) if path else "（未绑定）"
+        state = "✓" if info.get("exists") else "✗ 缺失"
+        self.lbl_home_info.setText(
+            f"当前银行类型：{self._current_bank}　绑定模板：{state} {name}")
+
+    def _start_check(self):
+        """点击「开始核查」进入核查功能页。"""
+        self._on_folder_changed(self._get_folder())
+        self.stack.setCurrentIndex(1)
+        self.setWindowTitle("存款保险核查 — 核查功能")
+        self._log(">>> 开始核查")
+
+    def _show_home(self):
+        """返回"存款保险核查"首页。"""
+        self._update_home_info()
+        self.stack.setCurrentIndex(0)
+        self.setWindowTitle("存款保险核查")
+
+    def _home_manage_bank(self):
+        """首页：打开银行类型 / 模板管理窗口。"""
+        from bank_selector import BankManageDialog
+        dlg = BankManageDialog(self, self.bank_mgr, self._current_bank)
+        dlg.exec_()
+        self.bank_selector.refresh(self.bank_mgr.last_bank)
+        self._on_bank_changed(self.bank_selector.current_bank())
+        self._update_home_info()
+
+    # ----------------------------------------------------------
+    # 核查功能页（原主界面）
+    # ----------------------------------------------------------
+
+    def _build_work_page(self):
+        """构建核查功能页（工作目录、调整值、操作按钮、日志）。"""
+        page = QWidget()
+        outer_wrapper = QVBoxLayout(page)
+        outer_wrapper.setContentsMargins(0, 0, 0, 0)
+
+        # 外层 ScrollArea 保证单页面可滚动（横向不出现滚动条）
         outer_scroll = QScrollArea()
         outer_scroll.setWidgetResizable(True)
         outer_scroll.setFrameShape(QFrame.NoFrame)
+        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         inner = QWidget()
         inner.setObjectName("innerWidget")
@@ -444,8 +581,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 12, 16, 16)
         layout.setSpacing(10)
 
+        # ---- 顶栏：返回首页 ----
+        bar = QHBoxLayout()
+        btn_back = QPushButton("← 返回首页")
+        btn_back.setFont(QFont("Microsoft YaHei", 9))
+        btn_back.setCursor(Qt.PointingHandCursor)
+        btn_back.clicked.connect(self._show_home)
+        bar.addWidget(btn_back)
+        bar.addStretch()
+        layout.addLayout(bar)
+
         # ---- 标题 ----
-        title = QLabel("存款保险申报表审核工具")
+        title = QLabel("存款保险核查 — 核查功能")
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -594,12 +741,8 @@ class MainWindow(QMainWindow):
 
         # 组装
         outer_scroll.setWidget(inner)
-        outer_wrapper = QVBoxLayout(central)
-        outer_wrapper.setContentsMargins(0, 0, 0, 0)
         outer_wrapper.addWidget(outer_scroll)
-
-        # 初始扫描
-        self._on_folder_changed(BASE_DIR)
+        return page
 
     # ----------------------------------------------------------
     # UI 辅助方法
@@ -1050,12 +1193,14 @@ class MainWindow(QMainWindow):
         self._logged_tpl_path = None
         path, source = self._resolve_template(log=True)
         self._log(f"[切换银行类型] {bank_name}（模板：{source}）")
+        self._update_home_info()
 
     def _on_template_changed(self, template_path):
         """模板绑定被更换后刷新路径并记录日志"""
         self._update_template_paths()
         self._logged_tpl_path = None
         self._resolve_template(log=True)
+        self._update_home_info()
 
     def _browse_folder(self):
         """弹出文件夹选择对话框"""
@@ -1275,7 +1420,8 @@ class MainWindow(QMainWindow):
                          os.path.exists(irp001_path) else None),
             base_check_path=(base_path if base_path and
                              os.path.exists(base_path) else None),
-            adjustments=adjustments)
+            adjustments=adjustments,
+            att5_path=att5_ok)
         self.thr_all.progress.connect(self._log)
         self.thr_all.finished.connect(self._val_all_done)
         self.thr_all.error.connect(self._val_all_err)
@@ -1320,6 +1466,9 @@ class MainWindow(QMainWindow):
 
         irp002_path = self._get_path('irp002')
         base_path = self._get_path('base_out')
+        # 附件5：用于读取久悬户调整额（c3/c4），供"存款归属 vs IRP001"比较时扣减
+        att5_path = self._get_path('att5')
+        att5_ok = att5_path if att5_path and os.path.exists(att5_path) else None
 
         # 说明：报告模板若含 IRP002 列才会用到 IRP002，故不再强制要求该文件
         if not irp002_path or not os.path.exists(irp002_path):
@@ -1336,6 +1485,7 @@ class MainWindow(QMainWindow):
         self._log(f"IRP001: {irp001_path}")
         self._log(f"IRP002: {irp002_path or '（未提供）'}")
         self._log(f"保费基数核对表: {base_path}")
+        self._log(f"附件5（久悬户调整额来源）: {att5_ok or '（未提供，改用调整项/核对表）'}")
         self._log(f"调整项: {len(adjustments)} 项")
         self._log(f"输出: {output_path}")
         self._log_sep()
@@ -1415,6 +1565,18 @@ class MainWindow(QMainWindow):
             QProgressBar::chunk { background: #0984e3; border-radius: 2px; }
             QScrollArea { border: none; background: transparent; }
             QWidget#innerWidget { background: transparent; }
+            QWidget#homePage {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #e8f1fb, stop:0.55 #f4f8fd,
+                                            stop:1 #ffffff);
+            }
+            QPushButton#startButton {
+                background-color: #1a73e8; color: white; border: none;
+                border-radius: 10px; font-size: 22px; font-weight: bold;
+                padding: 8px 24px;
+            }
+            QPushButton#startButton:hover { background-color: #1666cc; }
+            QPushButton#startButton:pressed { background-color: #1259b3; }
         """)
 
 

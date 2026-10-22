@@ -18,6 +18,9 @@
   3. generate_validation_report()     — 生成全面校验报告（Excel）
        - 以 IRP001 为基准，逐项输出存款归属核对（B列）、
          会计科目核对（C/D/E列）、IRP002（F/G/H列）的差额，不一致标红
+       - 存款归属 vs IRP001（本金）：IRP001 本金先扣久悬户调整额再比较
+         （个人=c3、单位=c4）；会计科目（被保险存款生成表）vs IRP001
+         不做该调整，直接比较
 
 校验逻辑（与《保费基数核对表（模板）》校验页一致）：
   - 存款归属核对：先对子项数据取数（A1411/A2411 按子项代码逐项取数），
@@ -55,7 +58,7 @@ from common import to_float, excel_round, ExcelSheet as _ExcelSheet
 from base_checker import (ADJ_SCOPE_ACCT, ADJ_SCOPE_DEP, ADJ_ROWS,
                           adjustment_row_values, describe_adjustments,
                           detect_template_layout, normalize_adjustments,
-                          summarize_adjustments)
+                          read_adjustments, summarize_adjustments)
 from bank_config import resolve_template
 from account_checker import _resolve_merged
 
@@ -977,7 +980,8 @@ def _resolve_report_template(base_check_path=None, template_path=None):
 
 def generate_validation_report(irp001_path, output_path,
                                irp002_path=None, base_check_path=None,
-                               adjustments=None, template_path=None):
+                               adjustments=None, template_path=None,
+                               att5_path=None):
     """
     按《校验表（新）》模板生成校验报告。
 
@@ -985,7 +989,10 @@ def generate_validation_report(irp001_path, output_path,
       A 列  = 项目名称
       B 列  = 存款归属核对（本金，万元） 与 会计科目核对（本金，万元）的比较
       C~E 列= 存款归属核对 与 IRP001（本金 / 利息 / 合计）的比较
-      F~H 列= 会计科目核对 与 IRP001（本金 / 利息 / 合计）的比较
+              其中"本金"比较时，IRP001 本金先扣减久悬户调整额
+              （个人=c3、单位=c4；存款归属口径不含久悬户）
+      F~H 列= 会计科目核对（被保险存款生成表）与 IRP001 的比较
+              该口径不做久悬户调整，直接比较
       （模板若另有 I~K 列（IRP002 块），则填 IRP002 与 IRP001 的比较）
 
     填写约定：
@@ -1000,6 +1007,8 @@ def generate_validation_report(irp001_path, output_path,
         base_check_path: 保费基数核对表_已生成.xlsx 路径（可选，提供存款归属/会计科目数据）
         adjustments:     调整项列表（可选；用于存款归属与 IRP001 的比较）
         template_path:   校验报告模板路径（可选，默认模板内置/程序目录）
+        att5_path:       附件5（银行报送的保费基数核对表）路径（可选）；
+                         未提供久悬户调整项时，从其差额说明列读取 c3/c4
 
     返回:
         list[str]: 运行日志消息列表
@@ -1033,12 +1042,41 @@ def generate_validation_report(irp001_path, output_path,
     else:
         msgs.append("  保费基数核对表: 未提供（存款归属/会计科目列将填“无对应数据”）")
 
+    # ---- 久悬户调整额（仅用于"存款归属 vs IRP001"比较）----
+    # 口径：存款归属（A1411/A2411）不含久悬户、IRP001 含久悬户，
+    #       因此比较时把 IRP001 本金扣减久悬户调整额（个人=c3、单位=c4）。
+    #       被保险存款生成表（会计科目）与 IRP001 比较时不做该调整。
     items = normalize_adjustments(adjustments) if adjustments else []
     _, dep_adj = summarize_adjustments(items) if items else ({}, {})
-    if not items and base_check_path and os.path.exists(str(base_check_path)):
-        base = _read_base_check_map(base_check_path)
-        dep_adj = {'个人存款': base.get('adjust', {}).get('c3', 0.0),
-                   '单位存款': base.get('adjust', {}).get('c4', 0.0)}
+    adj_source = '调整项配置' if dep_adj else ''
+    if items and not any(abs(v) > 1e-9 for v in dep_adj.values()):
+        dep_adj = {}          # 配置里没有"用途=存款归属核对"的项目 → 走回退
+    if not dep_adj:
+        # ① 核对表差额说明列（旧模板 Q9/Q10、新模板 P9/P10）
+        if base_check_path and os.path.exists(str(base_check_path)):
+            base = _read_base_check_map(base_check_path)
+            c3 = base.get('adjust', {}).get('c3', 0.0)
+            c4 = base.get('adjust', {}).get('c4', 0.0)
+            if abs(c3) > 1e-9 or abs(c4) > 1e-9:
+                dep_adj = {'个人存款': c3, '单位存款': c4}
+                adj_source = '核对表差额说明列'
+        # ② 附件5 差额说明列
+        if not dep_adj and att5_path and os.path.exists(str(att5_path)):
+            try:
+                a5 = read_adjustments(att5_path)
+            except Exception:
+                a5 = None
+            if a5:
+                dep_adj = {'个人存款': a5.get('c3', 0.0),
+                           '单位存款': a5.get('c4', 0.0)}
+                adj_source = '附件5 差额说明列'
+    dep_adj = dep_adj or {'个人存款': 0.0, '单位存款': 0.0}
+    msgs.append(
+        f"  久悬户调整额（存款归属核对用）："
+        f"个人={dep_adj.get('个人存款', 0.0):,.2f} 元，"
+        f"单位={dep_adj.get('单位存款', 0.0):,.2f} 元"
+        + (f"（来源：{adj_source}）" if adj_source
+           else "（调整项/核对表/附件5 均未提供，按 0 处理）"))
 
     # ---- 打开模板 ----
     tpl_path = _resolve_report_template(base_check_path, template_path)
@@ -1098,20 +1136,33 @@ def generate_validation_report(irp001_path, output_path,
         _write_report_cell(ws, r, 2, b_text, b_err)
         tally(b_text)
 
-        # C~E 列：存款归属（万元）vs IRP001 本金（扣调整后精确至万元）/ 利息 / 合计
+        # C~E 列：存款归属（万元）vs IRP001 本金（先扣减久悬户调整，再精确至万元）
+        #        —— 存款归属口径不含久悬户，IRP001 含久悬户，故在 IRP001 侧扣减；
+        #           被保险存款生成表（F~H 列）与 IRP001 比较时不做此调整。
         if d_val is not None and i1:
             if _is_ovs:
-                adj = 0.0        # 调整值只针对境内个人/单位存款
+                adj = 0.0        # 久悬户调整只针对境内个人/单位存款
+                irp_wan = excel_round((i1.get('principal', 0) - adj) / 10000.0, 0)
             elif label == '一、境内存款':
+                # 境内合计：按各分项"先扣久悬、再四舍五入至万元"后求和，
+                # 与核对表境内合计（各分项之和）口径一致，避免整体舍入造成假差异
                 adj = dep_adj.get('个人存款', 0.0) + dep_adj.get('单位存款', 0.0)
+                irp_wan = 0.0
+                for k in ('（一）个人存款', '（二）单位存款',
+                          '（三）财政性存款', '（四）非存款类金融机构存款'):
+                    k_adj = (dep_adj.get('个人存款', 0.0) if k == '（一）个人存款'
+                             else dep_adj.get('单位存款', 0.0) if k == '（二）单位存款'
+                             else 0.0)
+                    irp_wan += excel_round(
+                        (irp001.get(k, {}).get('principal', 0) - k_adj) / 10000.0, 0)
             else:
                 adj = dep_adj.get({'（一）个人存款': '个人存款',
                                    '（二）单位存款': '单位存款'}.get(label, ''), 0.0)
-            irp_wan = excel_round((i1.get('principal', 0) - adj) / 10000.0, 0)
+                irp_wan = excel_round((i1.get('principal', 0) - adj) / 10000.0, 0)
             if abs(d_val - irp_wan) <= TOL_WAN:
                 c_text, c_err = MATCH_TEXT, False
             else:
-                note = f"（已扣调整 {adj:,.2f} 元）" if adj else ''
+                note = f"（IRP001 已扣久悬户调整 {adj:,.2f} 元）" if adj else ''
                 c_text = (f"存款归属 {d_val:,.2f} 万元 / "
                           f"IRP001 {irp_wan:,.0f} 万元{note}")
                 c_err = True
