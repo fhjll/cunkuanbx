@@ -413,13 +413,24 @@ class HomePage(QWidget):
     def _build_background(self):
         """生成与当前窗口等大的背景缓存（避免每次重绘都逐行填充）。"""
         w, h = max(1, self.width()), max(1, self.height())
-        if self._cache is not None and self._cache_size == (w, h):
+        try:
+            dpr = float(self.devicePixelRatioF())
+        except Exception:
+            dpr = 1.0
+        if not dpr or dpr <= 0:
+            dpr = 1.0
+        if self._cache is not None and self._cache_size == (w, h, dpr):
             return self._cache
 
-        pix = QPixmap(w, h)
+        # 按设备像素比生成缓存，高分屏（Retina / Windows 缩放）下不糊
+        pw = max(1, int(round(w * dpr)))
+        ph = max(1, int(round(h * dpr)))
+        pix = QPixmap(pw, ph)
+        pix.setDevicePixelRatio(dpr)
         pix.fill(QColor(self.FALLBACK_COLOR))
         if not self._bg.isNull():
             p = QPainter(pix)
+            p.scale(dpr, dpr)
             src = self._bg
             sw, sh = src.width(), src.height()
             scaled = src.size().scaled(w, h, Qt.KeepAspectRatio)
@@ -442,7 +453,7 @@ class HomePage(QWidget):
             p.end()
 
         self._cache = pix
-        self._cache_size = (w, h)
+        self._cache_size = (w, h, dpr)
         return pix
 
     def paintEvent(self, event):
