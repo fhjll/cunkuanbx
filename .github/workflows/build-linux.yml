@@ -1,28 +1,18 @@
 name: Build Linux (麒麟/统信UOS) 程序
 
-# 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序。
-# 设计要点：
-#   - PyInstaller 不能跨平台/跨架构编译，必须在 Linux 上构建；
-#   - 构建放在 python:3.9-bullseye 官方完整镜像里进行（glibc 2.31，覆盖麒麟
-#     V10 SP2/SP3、统信 UOS 20 等；更老的麒麟 V10 SP1 请用 build_linux.sh
-#     在本机打包）；
-#   - 该镜像自带共享版 libpython 与 binutils（objdump）——PyInstaller 两者都要，
-#     且不依赖 apt（bullseye 的 security 源已失效），只用 pip 装 PyInstaller 6.x；
-#   - 产物先在容器内用 ASCII 名生成，回到宿主后再改名为中文；
-#   - 构建失败时把最后 30 行日志以 ::error:: 注解输出（便于在 Actions 页面
-#     与 API 上直接看到失败原因）。
+# 银河麒麟 / 统信UOS 等国产 Linux 上使用的独立可执行程序（手动构建）。
+# 说明：
+#   - 主用的"银河麒麟 V10 x86_64"版本已在 build-exe.yml 的
+#     build-kylin-v10-x64 作业中自动构建并随 Release 发布（glibc 2.28）；
+#   - 本工作流仅作补充：需要单独构建 x64 / arm64 时可手动触发；
+#   - 构建放在 python:3.8-buster（glibc 2.28，麒麟 V10 基线）官方完整镜像里，
+#     该镜像自带共享版 libpython 与 binutils（objdump），PyInstaller 两者都要；
+#   - 构建失败时把最后 8 行日志以 ::error:: 注解输出，便于排查。
 
 permissions:
   contents: write        # 失败时把构建日志推到 ci-log-<run> 分支便于排查
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '**.py'
-      - 'templates/**'
-      - 'requirements.txt'
-      - '.github/workflows/build-linux.yml'
   workflow_dispatch:
     inputs:
       arch:
@@ -41,16 +31,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in python:3.9-bullseye container (glibc 2.31)
+      - name: Build in python:3.8-buster container (glibc 2.28)
         run: |
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            python:3.9-bullseye bash -euxc '
+            python:3.8-buster bash -euxc '
               # 官方 python 镜像（完整版）自带共享版 libpython 与 binutils/objdump
               # （PyInstaller 两者都需要）；Qt 分析期需要 libGL 等运行库，apt 失败不中断
-              apt-get update || true
-              apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+              sed -i "s|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org|g" \
+                /etc/apt/sources.list || true
+              apt-get update -o Acquire::Check-Valid-Until=false || true
+              apt-get install -y --no-install-recommends binutils libgl1 libglib2.0-0 \
                 libxkbcommon0 libdbus-1-3 ca-certificates || true
               objdump --version | head -1
               pip install --upgrade pip wheel "setuptools<81"
@@ -112,14 +104,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in python:3.9-bullseye (arm64) container
+      - name: Build in python:3.8-buster (arm64) container
         run: |
           set +e
           docker run --rm -v "$PWD":/src -w /src \
             -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
-            arm64v8/python:3.9-bullseye bash -euxc '
-              apt-get update || true
-              apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+            arm64v8/python:3.8-buster bash -euxc '
+              sed -i "s|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org|g" \
+                /etc/apt/sources.list || true
+              apt-get update -o Acquire::Check-Valid-Until=false || true
+              apt-get install -y --no-install-recommends binutils libgl1 libglib2.0-0 \
                 libxkbcommon0 libdbus-1-3 ca-certificates || true
               pip install --upgrade pip wheel "setuptools<81"
               pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4

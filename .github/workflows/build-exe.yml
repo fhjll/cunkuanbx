@@ -27,6 +27,7 @@ on:
           - win10
           - win7-x64
           - win7-x86
+          - kylin-v10-x64
 
 jobs:
   build-win10:
@@ -131,9 +132,81 @@ jobs:
           name: 存保审核工具-win7-x86
           path: dist/存保审核工具_Win7_x86.exe
 
+  build-kylin-v10-x64:
+    # 银河麒麟 V10（x86_64）：glibc 2.28（Debian 10 基线）容器内构建，
+    # 同时兼容麒麟 V10 SP1/SP2/SP3 与统信 UOS 20 等国产 Linux。
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'kylin-v10-x64' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in python:3.8-buster container (glibc 2.28)
+        run: |
+          set +e
+          docker run --rm -v "$PWD":/src -w /src \
+            -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 \
+            python:3.8-buster bash -euxc '
+              # buster 已归档，改用 archive.debian.org 源安装 Qt 运行库/工具
+              sed -i "s|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org|g" \
+                /etc/apt/sources.list || true
+              apt-get update -o Acquire::Check-Valid-Until=false || true
+              apt-get install -y --no-install-recommends binutils libgl1 libglib2.0-0 \
+                libxkbcommon0 libdbus-1-3 ca-certificates || true
+              objdump --version | head -1 || true
+              pip install --upgrade pip wheel "setuptools<81"
+              pip install pyinstaller==6.11.1 openpyxl xlrd PyQt5==5.15.4
+              pyinstaller --onefile --noconfirm --name app \
+                --add-data "templates:templates" --add-data "bg.jpeg:." gui.py
+              mv dist/app "dist/存保审核工具"
+              ls -l dist/
+            ' 2>&1 | tee build-kylin.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            i=0
+            while IFS= read -r line; do
+              i=$((i+1))
+              echo "::error title=麒麟V10构建失败(exit $rc) 第${i}行::$(printf '%s' "$line" | sed 's/%/%25/g' | cut -c1-900)"
+            done < <(tail -8 build-kylin.log)
+            exit 1
+          fi
+
+      - name: Verify glibc <= 2.28 (麒麟 V10 兼容性)
+        run: |
+          chmod +x "dist/存保审核工具"
+          objdump -T "dist/存保审核工具" | grep -o 'GLIBC_[0-9.]*' \
+            | sed 's/GLIBC_//' | sort -uV > /tmp/glibc_versions.txt || true
+          echo "GLIBC symbols required:"; cat /tmp/glibc_versions.txt
+          python3 - <<'PY'
+          import sys
+          vs = [l.strip() for l in open('/tmp/glibc_versions.txt') if l.strip().startswith('2.')]
+          def key(v):
+              return tuple(int(x) for x in v.split('.'))
+          if vs:
+              mx = max(vs, key=key)
+              print('max GLIBC required:', mx)
+              if key(mx) > (2, 28):
+                  sys.exit(f'GLIBC {mx} 高于麒麟 V10 的 2.28，无法保证兼容')
+          else:
+              print('warning: 未解析到 GLIBC 依赖符号')
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 存保审核工具-kylin-v10-x64
+          path: dist/存保审核工具
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-kylin-log
+          path: build-kylin.log
+          if-no-files-found: ignore
+
   publish-release:
     # Win7 x64 / x86 构建成功后，把 exe 打包成 zip 发布到 Release（公开下载）
-    needs: [build-win7-x64, build-win7-x86]
+    needs: [build-win7-x64, build-win7-x86, build-kylin-v10-x64]
     if: ${{ github.event_name == 'push' || github.event.inputs.target == 'all' }}
     runs-on: ubuntu-latest
     permissions:
@@ -153,14 +226,23 @@ jobs:
           name: 存保审核工具-win7-x86
           path: pkg/win7-x86
 
-      - name: Pack zips (exe + 使用说明)
+      - name: Download Kylin V10 x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 存保审核工具-kylin-v10-x64
+          path: pkg/kylin-v10-x64
+
+      - name: Pack zips (程序 + 使用说明)
         run: |
           set -euo pipefail
           mkdir -p release
-          cp "使用说明（简易版）.txt" "pkg/win7-x64/" 2>/dev/null || true
-          cp "使用说明（简易版）.txt" "pkg/win7-x86/" 2>/dev/null || true
+          for d in win7-x64 win7-x86 kylin-v10-x64; do
+            cp "使用说明（简易版）.txt" "pkg/$d/" 2>/dev/null || true
+          done
+          chmod +x "pkg/kylin-v10-x64/存保审核工具" 2>/dev/null || true
           (cd pkg/win7-x64 && zip -r "../../release/CunBaoTool_Win7_x64.zip" .)
           (cd pkg/win7-x86 && zip -r "../../release/CunBaoTool_Win7_x86.zip" .)
+          (cd pkg/kylin-v10-x64 && zip -r "../../release/CunBaoTool_KylinV10_x64.zip" .)
           (cd release && sha256sum *.zip > SHA256SUMS.txt)
           ls -lh release
 
@@ -171,8 +253,8 @@ jobs:
           set -euo pipefail
           gh release view ci-latest >/dev/null 2>&1 || \
             gh release create ci-latest \
-              --title "存保审核工具 最新自动构建（Win7 x64 / x86）" \
-              --notes "由 GitHub Actions 自动构建的 Windows 7 64 位 / 32 位可执行程序（内含模板与使用说明）。每次 push 后覆盖更新。" \
+              --title "存保审核工具 最新自动构建（Win7 x64/x86 + 银河麒麟 V10 x64）" \
+              --notes "由 GitHub Actions 自动构建：Windows 7 64 位 / 32 位 + 银河麒麟 V10（x86_64）独立可执行程序（内含模板、背景图与使用说明）。每次 push 后覆盖更新。" \
               --prerelease
           # 清掉旧版本/旧文件名的资产，保证 Release 里只有本次产物
           for asset in $(gh release view ci-latest --json assets -q '.assets[].name'); do

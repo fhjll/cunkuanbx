@@ -15,10 +15,14 @@
 
 二、怎么启动
 ────────────
-· Windows：直接双击 exe 文件（Win10/11 用存保审核工具.exe；
-  Win7 用 存保审核工具_Win7_x64.exe 或 存保审核工具_Win7_x86.exe）。
-· 银河麒麟 / 统信 UOS：双击 run_linux.sh（或命令行 bash run_linux.sh）；
-  也可以使用打包好的单文件程序。
+提供三个打包版本（解压后直接运行，无需安装 Python）：
+· Windows 7 64 位：CunBaoTool_Win7_x64.zip → 存保审核工具_Win7_x64.exe
+· Windows 7 32 位：CunBaoTool_Win7_x86.zip → 存保审核工具_Win7_x86.exe
+· 银河麒麟 V10（x86_64）：CunBaoTool_KylinV10_x64.zip → 存保审核工具
+    chmod +x 存保审核工具 && ./存保审核工具
+    （或在文件管理器里允许执行后双击；依赖缺 libxcb/libxkbcommon 时按提示安装）
+· 另外也提供 Windows 10/11 版本：存保审核工具.exe。
+· 源码运行：python3 gui.py。
 · 首次启动若提示缺少字体/依赖，按提示安装即可（Windows 上一般不需要装任何东西）。
 · 启动后先显示带《存款保险》主题背景图的首页，页面上只有
   「存款保险申报表非现场审核助手」和「开始核查」「银行类型 / 模板设置…」两个按钮；

@@ -429,8 +429,10 @@ class HomePage(QWidget):
         pix.setDevicePixelRatio(dpr)
         pix.fill(QColor(self.FALLBACK_COLOR))
         if not self._bg.isNull():
+            # 注意：在设置了 devicePixelRatio 的 QPixmap 上绘制时，
+            # QPainter 已自动按 DPR 缩放坐标，这里不能再 p.scale(dpr, dpr)，
+            # 否则会二次缩放，导致背景图偏移、放大、不居中。
             p = QPainter(pix)
-            p.scale(dpr, dpr)
             src = self._bg
             sw, sh = src.width(), src.height()
             scaled = src.size().scaled(w, h, Qt.KeepAspectRatio)
