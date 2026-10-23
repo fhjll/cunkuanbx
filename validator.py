@@ -1129,10 +1129,39 @@ def generate_validation_report(irp001_path, output_path,
         i1 = irp001.get(irp_key) if irp_key else None
         i2 = irp002.get(irp002_key) if irp002_key else None
 
-        # B 列：存款归属（万元）vs 会计科目（万元）
-        b_left = d_val
-        b_right = (a or {}).get('principal', 0) / 10000.0 if a else None
-        b_text, b_err = _cmp_text('存款归属', b_left, '会计科目', b_right, TOL_WAN, '万元')
+        # B 列：存款归属（万元）vs 会计科目（万元，先扣久悬户调整）
+        #   会计科目核对列里已含个体工商户重分类（表内调整项），但久悬户
+        #   只属于"存款归属 vs IRP001"口径；若不在会计科目侧扣掉久悬户，
+        #   B 列就会多出一笔久悬户差异（看起来像"调整值没加上"）。
+        if d_val is None:
+            b_text, b_err = NO_DATA_TEXT, False
+        else:
+            b_right = None
+            if label == '一、境内存款':
+                b_right = 0.0
+                any_acct = False
+                for k in ('（一）个人存款', '（二）单位存款',
+                          '（三）财政性存款', '（四）非存款类金融机构存款'):
+                    ai = acct.get(k)
+                    if not ai:
+                        continue
+                    any_acct = True
+                    k_adj = (dep_adj.get('个人存款', 0.0) if k == '（一）个人存款'
+                             else dep_adj.get('单位存款', 0.0)
+                             if k == '（二）单位存款' else 0.0)
+                    b_right += excel_round(
+                        (ai.get('principal', 0) - k_adj) / 10000.0, 0)
+                if not any_acct:
+                    b_right = None
+            else:
+                a_principal = (a or {}).get('principal') if a else None
+                if a_principal is not None:
+                    b_adj = dep_adj.get({'（一）个人存款': '个人存款',
+                                         '（二）单位存款': '单位存款'}.get(label, ''), 0.0)
+                    b_right = excel_round((a_principal - b_adj) / 10000.0, 0)
+            b_left = excel_round(d_val, 0)
+            b_text, b_err = _cmp_text('存款归属', b_left, '会计科目', b_right,
+                                      TOL_WAN, '万元')
         _write_report_cell(ws, r, 2, b_text, b_err)
         tally(b_text)
 
@@ -1225,7 +1254,8 @@ def generate_validation_report(irp001_path, output_path,
         if v.startswith('说明'):
             cell = ws.cell(r, 1)
             cell.value = (
-                "说明：B列＝存款归属核对与会计科目核对（本金，万元）比较；"
+                "说明：B列＝存款归属核对与会计科目核对（本金，万元；"
+                "会计科目已扣久悬户调整）比较；"
                 "C~E列＝存款归属核对与IRP001（本金/利息/合计）比较；"
                 "F~H列＝会计科目核对与IRP001（本金/利息/合计）比较"
                 + ("；I~K列＝IRP002与IRP001比较" if has_irp002_cols else "") +
