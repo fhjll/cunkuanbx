@@ -172,7 +172,7 @@ jobs:
 
       - name: Verify glibc <= 2.28 (麒麟 V10 兼容性)
         run: |
-          chmod +x "dist/存保审核工具"
+          ls -l "dist/存保审核工具"
           objdump -T "dist/存保审核工具" | grep -o 'GLIBC_[0-9.]*' \
             | sed 's/GLIBC_//' | sort -uV > /tmp/glibc_versions.txt || true
           echo "GLIBC symbols required:"; cat /tmp/glibc_versions.txt
