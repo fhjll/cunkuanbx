@@ -61,9 +61,10 @@ from common import get_resource_path
 
 from base_checker import (BaseChecker, read_adjustments,
                           build_default_adjustments, normalize_adjustments,
-                          merge_standard_pairs,
+                          merge_standard_pairs, detect_template_layout,
                           ADJ_SCOPES, ADJ_TARGET_OPTIONS, ADJ_DEP_TARGETS,
-                          ADJ_FIELDS, ADJ_MODES, ADJ_SCOPE_DEP, ADJ_DEP_FIELD)
+                          ADJ_FIELDS, ADJ_MODES, ADJ_SCOPE_ACCT,
+                          ADJ_SCOPE_DEP, ADJ_DEP_FIELD, ADJ_TARGET_BOTH)
 from validator import (
     validate_irp002, validate_base_check_vs_irp001,
     generate_validation_report)
@@ -292,14 +293,13 @@ class ReportGenThread(QThread):
 
     def __init__(self, irp001_path, output_path,
                  irp002_path=None, base_check_path=None,
-                 adjustments=None, att5_path=None):
+                 adjustments=None):
         super().__init__()
         self.irp001_path = irp001_path
         self.output_path = output_path
         self.irp002_path = irp002_path
         self.base_check_path = base_check_path
         self.adjustments = adjustments or []
-        self.att5_path = att5_path
 
     def run(self):
         try:
@@ -309,8 +309,7 @@ class ReportGenThread(QThread):
                 output_path=self.output_path,
                 irp002_path=self.irp002_path,
                 base_check_path=self.base_check_path,
-                adjustments=self.adjustments,
-                att5_path=self.att5_path)
+                adjustments=self.adjustments)
             self.finished.emit(msgs)
         except Exception as e:
             import traceback
@@ -719,8 +718,8 @@ class MainWindow(QMainWindow):
         adj_layout.setSpacing(6)
 
         tip = QLabel(
-            "用途「会计科目核对」：调整会计科目合计（写入表内调整项行）；"
-            "用途「存款归属核对」：比较时按方式增减 IRP001 本金（写入 Q9/Q10）。\n"
+            "用途「存款归属表」：调整存款归属表合计（写入表内调整项行）；"
+            "用途「A1411、2411合计表」：直接把调整值加到该表对应项本金。\n"
             "对象选「个人↔单位」表示一增一减（个人增、单位减），"
             "个体工商户即用此项；对象也可选财政性存款等其他合计项，"
             "调整额会并入该合计项。名称可自由填写，标准项不可删除。"
@@ -769,7 +768,7 @@ class MainWindow(QMainWindow):
         btn_reset = QPushButton("恢复标准项")
         btn_reset.setFont(QFont("Microsoft YaHei", 9))
         btn_reset.setCursor(Qt.PointingHandCursor)
-        btn_reset.setToolTip("恢复六条标准调整项（金额清零）")
+        btn_reset.setToolTip("恢复四条标准调整项（金额清零）")
         btn_reset.clicked.connect(lambda: self._set_adjustments(
             build_default_adjustments()))
         btn_row.addWidget(btn_reset)
@@ -1178,6 +1177,27 @@ class MainWindow(QMainWindow):
             if len(merged) < len(items):
                 self._log(f"[调整值] 已合并个体工商户成对项目: "
                           f"{len(items)} → {len(merged)} 项")
+            # 兼容旧版久悬户口径：旧配置把久悬户放在"存款归属核对/扣减"，
+            # 含义是"从 IRP001 扣减"；新口径改为"存款归属核对/增加"，
+            # 直接加到存款归属表对应项（金额不变，方向由扣减改为增加）。
+            converted = 0
+            for it in merged:
+                name = str(it.get('name') or '')
+                if it.get('scope') == ADJ_SCOPE_DEP and '久悬' in name:
+                    it['name'] = '久悬户轧差值'
+                    it['field'] = ADJ_DEP_FIELD
+                    if it.get('mode') != '增加':
+                        it['mode'] = '增加'
+                        converted += 1
+            if converted:
+                self._log(f"[调整值] 旧版久悬户调整项已按新口径转换: "
+                          f"{converted} 项（A1411、2411合计表→久悬户轧差值，"
+                          f"方向改为增加，金额请核对）")
+            if any(it.get('scope') == ADJ_SCOPE_ACCT and '久悬' in
+                   str(it.get('name') or '') and '轧差' not in
+                   str(it.get('name') or '') for it in merged):
+                self._log("[调整值] 提示：配置中仍有会计科目侧的旧久悬调整项，"
+                          "若新模板已自动取久悬科目余额，请核对是否重复计算")
             return merged or None
         except Exception as e:
             self._log(f"[调整值] 配置文件读取失败: {e}")
@@ -1210,13 +1230,90 @@ class MainWindow(QMainWindow):
             return
         self._seed_adjustments_from_att5(paths, force=True)
 
+    def _template_jiuxuan_amounts(self):
+        """
+        计算模板中"久悬户"相关科目行已自动计入的金额（元）。
+
+        返回:
+            dict:
+              acct: 存款归属表（科目余额口径）中久悬科目行金额合计
+                    （支出类取负号；模板 H 合计公式已自动计入的部分）
+              dep : A1411、2411合计表（万元口径）公式中已加回的久悬科目部分
+                    （模板 E 列公式引用了上述久悬科目金额行时等于 acct，否则 0）
+
+        说明：这两部分都直接从模板+科目余额表取数计算，用于"从附件5读取"时
+        把久悬户总额拆成"已自动计入部分 + 需要补的轧差值"。
+        """
+        try:
+            import re
+            template, _ = self._resolve_template()
+            bal = self._get_path('base_src')
+            if not template or not os.path.isfile(template):
+                return {'acct': 0.0, 'dep': 0.0}
+            if not bal or not os.path.isfile(bal):
+                return {'acct': 0.0, 'dep': 0.0}
+            import openpyxl
+            from openpyxl.utils import column_index_from_string
+            wb = openpyxl.load_workbook(template, data_only=False)
+            ws = wb.worksheets[0]
+            layout = detect_template_layout(lambda r, c: ws.cell(r, c).value)
+            code_col = column_index_from_string(layout['acct_p_code'])
+            name_col = column_index_from_string(layout['acct_p_name'])
+            amount_col = layout['acct_p_amount']
+            ck = BaseChecker()
+            ck.load_account_balance(bal)
+            jiuxuan = {}       # 行号 -> 金额（元，支出类为负）
+            for r in range(1, ws.max_row + 1):
+                name = str(ws.cell(r, name_col).value or '').strip()
+                code = ws.cell(r, code_col).value
+                if not name or not code or '久悬' not in name:
+                    continue
+                if isinstance(code, (int, float)):
+                    code_s = str(int(code))
+                else:
+                    code_s = str(code).strip()
+                val = ck.lookup_acct(code_s)
+                jiuxuan[r] = -val if '支出' in name else val
+            acct_total = max(0.0, sum(jiuxuan.values()))
+            # 检查 A1411、2411合计表（存款归属金额列）公式是否引用了这些久悬行
+            dep_included = False
+            dep_col = layout['dep_amount']
+            ref_re = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+)")
+            for r in range(1, ws.max_row + 1):
+                cell = ws.cell(r, column_index_from_string(dep_col)).value
+                text = cell if isinstance(cell, str) else str(
+                    getattr(cell, 'text', '') or '')
+                if not text.strip().startswith('='):
+                    continue
+                for m in ref_re.finditer(text):
+                    if (m.group(1).upper() == amount_col
+                            and int(m.group(2)) in jiuxuan):
+                        dep_included = True
+                        break
+                if dep_included:
+                    break
+            wb.close()
+            dep_total = acct_total if dep_included else 0.0
+            if acct_total or dep_total:
+                self._log(f"[调整值] 模板久悬科目行：存款归属表已计入 "
+                          f"{acct_total:,.2f} 元；A1411、2411合计表公式已加回 "
+                          f"{dep_total:,.2f} 元")
+            return {'acct': acct_total, 'dep': dep_total}
+        except Exception as e:
+            self._log(f"[调整值] 模板久悬科目金额计算失败（按 0 处理）: {e}")
+            return {'acct': 0.0, 'dep': 0.0}
+
     def _seed_adjustments_from_att5(self, att5_paths, force=False):
         """
-        按标准口径（个体工商户 + 久悬户）重建调整项，金额取自附件5。
+        按新标准口径重建调整项，金额取自附件5。
 
-        附件5 的差额说明列（旧模板 Q / 新模板 P）前四格：
-        第7/8行 = 个人侧净调整额（本金/利息）、第9/10行 = 久悬户
-        （个 人/单位），对应默认的六条调整项。
+        附件5 差额说明列前四格：第7/8行=个人侧净调整额（本金/利息），
+        第9/10行=个人/单位久悬户调整额。重建规则：
+          · 个体工商户本金/利息 → 存款归属表（对象=个人↔单位，个人增、单位减）
+          · 久悬户轧差值 → A1411、2411合计表：个人/单位存款本金 增加，
+            金额 = c3/c4 − 模板公式已加回的久悬科目部分（个人侧）
+          · 久悬户轧差值 → 存款归属表：金额 = c3/c4 − 模板久悬科目行
+            已自动计入的金额（个人侧；单位侧模板无久悬科目行则不扣减）
 
         参数:
             att5_paths (list[str]): 附件5 候选路径
@@ -1226,19 +1323,62 @@ class MainWindow(QMainWindow):
             bool: 是否成功重建
         """
         if not att5_paths:
-            return
+            return False
         if not force and any(it['amount'] for it in self._get_adjustments()):
-            return   # 已手工填写金额，不覆盖
+            return False   # 已手工填写金额，不覆盖
         adj = read_adjustments(att5_paths[0])
         if not adj:
             return False
-        self._set_adjustments(build_default_adjustments(
-            adj.get('c1', 0.0), adj.get('c2', 0.0),
-            adj.get('c3', 0.0), adj.get('c4', 0.0)))
+        def _f(key):
+            try:
+                return float(adj.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        c1, c2 = _f('c1'), _f('c2')
+        c3, c4 = _f('c3'), _f('c4')
+        included = self._template_jiuxuan_amounts()
+        in_acct, in_dep = included['acct'], included['dep']
+
+        def item(name, scope, target, field, amount):
+            return {'name': name, 'scope': scope, 'target': target,
+                    'field': field, 'mode': '增加',
+                    'amount': round(amount, 2), 'locked': True}
+
+        items = [
+            item('个体工商户本金', ADJ_SCOPE_ACCT, ADJ_TARGET_BOTH, '本金', c1),
+            item('个体工商户利息', ADJ_SCOPE_ACCT, ADJ_TARGET_BOTH,
+                 '应付利息', c2),
+        ]
+
+        def add_jiuxuan(target, amount):
+            if not amount:
+                return
+            # 个人侧模板已有久悬科目行（存款归属表自动取数、A1411侧公式加回），
+            # 需要补的只是"轧差值"；单位侧模板无久悬行，直接取全额。
+            if target == '个人存款':
+                acct_amount = max(0.0, amount - in_acct)
+                dep_amount = max(0.0, amount - in_dep)
+            else:
+                acct_amount = dep_amount = amount
+            items.append(item('久悬户轧差值', ADJ_SCOPE_ACCT, target,
+                              '本金', acct_amount))
+            items.append(item('久悬户轧差值', ADJ_SCOPE_DEP, target,
+                              '本金', dep_amount))
+
+        add_jiuxuan('个人存款', c3)
+        add_jiuxuan('单位存款', c4)
+        if not (c3 or c4):
+            items.append(item('久悬户轧差值', ADJ_SCOPE_ACCT, '个人存款',
+                              '本金', 0.0))
+            items.append(item('久悬户轧差值', ADJ_SCOPE_DEP, '个人存款',
+                              '本金', 0.0))
+        self._set_adjustments(items)
         self._log(f"[调整值] 已从附件5重建标准调整项: "
                   f"{os.path.basename(att5_paths[0])}  "
-                  f"个体工商户本金={adj.get('c1', 0):,.2f} 利息={adj.get('c2', 0):,.2f} "
-                  f"个人久悬户={adj.get('c3', 0):,.2f} 单位久悬户={adj.get('c4', 0):,.2f}")
+                  f"个体工商户本金={c1:,.2f} 利息={c2:,.2f}  "
+                  f"久悬户调整: 个人={c3:,.2f}（模板已自动计入：存款归属表 "
+                  f"{in_acct:,.2f} / A1411、2411合计表 {in_dep:,.2f}）"
+                  f"单位={c4:,.2f}")
         return True
 
     def _refresh_adjustments(self, att5_paths):
@@ -1363,8 +1503,8 @@ class MainWindow(QMainWindow):
         执行操作1：生成保费基数核对表。
 
         数据来源：
-          - 存款归属核对 ← A1411 / A2411 月报表（万元）
-          - 会计科目核对 ← 科目余额表（元）
+          - A1411、2411合计表 ← A1411 / A2411 月报表（万元）
+          - 存款归属表 ← 科目余额表（元）
           - 被保险存款申报表（IRP001）← IRP001 申报表（元）
         各数据块所在列按模板表头自动识别（旧版/新版附5模板均支持），
         再按模板公式对子项数据计算合并，并写入校验页差额。
@@ -1423,7 +1563,7 @@ class MainWindow(QMainWindow):
         self.btn_base.setEnabled(False)
         self.prog_bar.setVisible(True)
         self.log_view.clear()
-        self._log(">>> 开始生成保费基数核对表（存款归属核对 + 会计科目核对）")
+        self._log(">>> 开始生成保费基数核对表（A1411、2411合计表 + 存款归属表）")
         self._log(f"A1411: {a1411}")
         self._log(f"A2411: {a2411}")
         self._log(f"科目余额表: {bal}")
@@ -1472,7 +1612,7 @@ class MainWindow(QMainWindow):
         一次性顺序执行两项校验：
           1. IRP002 内部校验 + 与 IRP001 交叉校验
           2. 保费基数核对表 vs IRP001 校验
-             （存款归属核对 F列 + 会计科目核对 I/L/M列）
+             （A1411、2411合计表 F列 + 存款归属表 I/L/M列）
         """
         folder = self._get_folder()
 
@@ -1483,8 +1623,8 @@ class MainWindow(QMainWindow):
         self.prog_bar.setVisible(True)
         self.log_view.clear()
         self._log(">>> 开始执行数据校验")
-        self._log(f"调整项: {len(adjustments)} 项（会计科目核对类已含在核对表内，"
-                  f"存款归属核对类用于比较时调整 IRP001 本金）")
+        self._log(f"调整项: {len(adjustments)} 项（存款归属表类已含在核对表内，"
+                  f"A1411、2411合计表类已直接加到该表对应项本金）")
         self._log_sep()
 
         irp001_path = self._get_path('irp001')
@@ -1543,9 +1683,6 @@ class MainWindow(QMainWindow):
 
         irp002_path = self._get_path('irp002')
         base_path = self._get_path('base_out')
-        # 附件5：用于读取久悬户调整额（c3/c4），供"存款归属 vs IRP001"比较时扣减
-        att5_path = self._get_path('att5')
-        att5_ok = att5_path if att5_path and os.path.exists(att5_path) else None
 
         # 说明：报告模板若含 IRP002 列才会用到 IRP002，故不再强制要求该文件
         if not irp002_path or not os.path.exists(irp002_path):
@@ -1562,7 +1699,6 @@ class MainWindow(QMainWindow):
         self._log(f"IRP001: {irp001_path}")
         self._log(f"IRP002: {irp002_path or '（未提供）'}")
         self._log(f"保费基数核对表: {base_path}")
-        self._log(f"附件5（久悬户调整额来源）: {att5_ok or '（未提供，改用调整项/核对表）'}")
         self._log(f"调整项: {len(adjustments)} 项")
         self._log(f"输出: {output_path}")
         self._log_sep()
@@ -1573,8 +1709,7 @@ class MainWindow(QMainWindow):
             irp002_path=(irp002_path if os.path.exists(irp002_path) else None),
             base_check_path=(base_path if base_path and
                              os.path.exists(base_path) else None),
-            adjustments=adjustments,
-            att5_path=att5_ok)
+            adjustments=adjustments)
         self.thr_report.progress.connect(self._log)
         self.thr_report.finished.connect(self._report_done)
         self.thr_report.error.connect(self._report_err)

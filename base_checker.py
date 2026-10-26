@@ -30,7 +30,7 @@
 调整值（可自定义的调整项列表）：
   每个调整项包含：名称、用途、对象、字段、方式、金额（元）
     用途：会计科目核对（写入表内"调整项"行，参与会计科目合计）
-          存款归属核对（比较时按方式增减 IRP001 本金，写入差额说明列第9/10行）
+          存款归属核对（直接加到核对表"存款归属核对"对应项本金上）
     对象：个人存款 / 单位存款
     字段：本金 / 应付利息（用途=存款归属核对时只比较本金，固定为"本金"）
     方式：增加 / 扣减
@@ -40,11 +40,11 @@
       高级管理人员 / 不予保险的其他存款（模板无专门调整行，
       调整额直接并入该合计项的公式，上层汇总同步生效）
   项目可自由增删（标准项除外，其 locked=True 不可删除）；
-  标准口径（个体工商户 + 久悬户）为：
-    · 个体工商户本金  会计科目核对 个人↔单位 本金     增加   （个人＋、单位－）
-    · 个体工商户利息  会计科目核对 个人↔单位 应付利息 增加   （个人＋、单位－）
-    · 个人久悬户      存款归属核对 个人存款 本金     扣减   → Q9
-    · 单位久悬户      存款归属核对 单位存款 本金     扣减   → Q10
+  标准口径（个体工商户 + 久悬户轧差值）为：
+    · 个体工商户本金      会计科目核对 个人↔单位 本金     增加（个人＋、单位－）
+    · 个体工商户利息      会计科目核对 个人↔单位 应付利息 增加（个人＋、单位－）
+    · 久悬户轧差值        会计科目核对 个人存款 本金     增加
+    · 久悬户轧差值        存款归属核对 个人存款 本金     增加
   差额说明列第7/8行保存"由单位调整至个人"的个人侧净额（本金/利息），供外部核对。
 
 单位说明：
@@ -141,9 +141,12 @@ def detect_template_layout(get_value):
         return None
 
     try:
-        # ---- 1) 第 4 行：四个区块的起始列 ----
-        dep_start = find_in_row(4, '存款归属', 1, 40)
-        acct_start = find_in_row(4, '会计科目核对', 1, 40)
+        # ---- 1) 第 4 行：四个区块的起始列（兼容新旧表名） ----
+        # 新表名：C4=A1411、2411合计表，F4=存款归属表；旧表名：存款归属核对/会计科目核对
+        dep_start = (find_in_row(4, 'A1411', 1, 40)
+                     or find_in_row(4, '存款归属', 1, 40))
+        acct_start = (find_in_row(4, '会计科目', 1, 40)
+                      or find_in_row(4, '存款归属表', 1, 40))
         irp_start = find_in_row(4, '被保险存款申报表', 1, 40)
         note_start = find_in_row(4, '差额说明', 1, 40)
         if not (dep_start and acct_start and irp_start and note_start):
@@ -162,9 +165,16 @@ def detect_template_layout(get_value):
             amount_col = find_exact(r, '本金', dep_start, acct_start - 1)
             if amount_col:
                 break
+        name_col = None
+        for r in (5, 6):
+            name_col = find_in_row(r, '子项名称', dep_start, acct_start - 1)
+            if name_col:
+                break
         if code_col:
             layout['dep_code'] = get_column_letter(code_col)
-            layout['dep_name'] = get_column_letter(code_col + 1)
+        if name_col or code_col:
+            layout['dep_name'] = get_column_letter(
+                name_col if name_col else code_col + 1)
         if amount_col:
             layout['dep_amount'] = get_column_letter(amount_col)
 
@@ -217,9 +227,14 @@ def detect_template_layout(get_value):
 # ------------------------------------------------------------
 # 调整项取值范围
 # ------------------------------------------------------------
-ADJ_SCOPE_ACCT = '会计科目核对'      # 参与会计科目合计（写入表内调整项行）
-ADJ_SCOPE_DEP = '存款归属核对'       # 参与存款归属与 IRP001 的比较（写入 Q9/Q10）
+ADJ_SCOPE_ACCT = '存款归属表'          # 科目余额表口径（写入表内调整项行）
+ADJ_SCOPE_DEP = 'A1411、2411合计表'     # A1411/A2411 口径（直接加到该表对应项本金）
 ADJ_SCOPES = (ADJ_SCOPE_ACCT, ADJ_SCOPE_DEP)
+# 旧版用途名称 → 新表名（兼容已保存的调整值配置.json）
+ADJ_SCOPE_ALIASES = {
+    '会计科目核对': ADJ_SCOPE_ACCT,
+    '存款归属核对': ADJ_SCOPE_DEP,
+}
 ADJ_TARGETS = ('个人存款', '单位存款')
 ADJ_TARGET_BOTH = '个人↔单位'        # 一增一减：个人按方式增减、单位同步反向
 # 会计科目核对表的其他合计项（模板无专门调整行，调整额直接并入该合计公式）
@@ -248,8 +263,8 @@ ADJ_DEP_FIELD = '本金'               # 存款归属核对只比较本金
 DEFAULT_ADJUSTMENT_ITEMS = [
     ('个体工商户本金', ADJ_SCOPE_ACCT, ADJ_TARGET_BOTH, '本金', '增加', True),
     ('个体工商户利息', ADJ_SCOPE_ACCT, ADJ_TARGET_BOTH, '应付利息', '增加', True),
-    ('个人久悬户', ADJ_SCOPE_DEP, '个人存款', '本金', '扣减', False),
-    ('单位久悬户', ADJ_SCOPE_DEP, '单位存款', '本金', '扣减', False),
+    ('久悬户轧差值', ADJ_SCOPE_ACCT, '个人存款', '本金', '增加', True),
+    ('久悬户轧差值', ADJ_SCOPE_DEP, '个人存款', '本金', '增加', True),
 ]
 
 # 说明：所有计算口径（合计公式、调整项所在单元格、取数代码）都从传入的模板
@@ -276,16 +291,20 @@ ATT_NAME_HINTS = {'att2': '住房公积金', 'att3': '社保基金'}
 
 def build_default_adjustments(c1=0, c2=0, c3=0, c4=0):
     """
-    按标准口径生成调整项列表（个体工商户本金/利息 + 个人/单位久悬户）。
+    按标准口径生成调整项列表。
+
+    标准项：个体工商户本金/利息 + 久悬户轧差值（会计科目侧、存款归属侧各一条）。
+    久悬户轧差值按"增加"处理：会计科目侧加到会计科目核对表本金，
+    存款归属侧加到存款归属核对表本金（见 compute 的 Step 3b）。
 
     参数:
         c1 (float): 个体工商户本金（个人增、单位减）
         c2 (float): 个体工商户应付利息（个人增、单位减）
-        c3 (float): 个人久悬户（存款归属核对时从 IRP001 个人本金中扣减）
-        c4 (float): 单位久悬户（存款归属核对时从 IRP001 单位本金中扣减）
+        c3 (float): 久悬户轧差值 —— 会计科目核对侧（元，方式=增加）
+        c4 (float): 久悬户轧差值 —— 存款归属核对侧（元，方式=增加）
 
     返回:
-        list[dict]: 调整项列表（4 条：个体工商户本金/利息、个人/单位久悬户）
+        list[dict]: 4 条标准调整项
     """
     amounts = [c1, c2, c3, c4]
     return [
@@ -312,7 +331,7 @@ def normalize_adjustments(items):
         if not isinstance(it, dict):
             continue
         name = str(it.get('name', '') or '').strip()
-        scope = it.get('scope', ADJ_SCOPE_ACCT)
+        scope = ADJ_SCOPE_ALIASES.get(it.get('scope'), it.get('scope', ADJ_SCOPE_ACCT))
         target = it.get('target', ADJ_TARGETS[0])
         field = it.get('field', ADJ_FIELDS[0])
         mode = it.get('mode', ADJ_MODES[0])
@@ -398,8 +417,8 @@ def summarize_adjustments(items):
     返回:
         tuple:
           acct (dict): {(对象, 字段): 净额} —— 会计科目核对（写入表内调整项行）
-          dep  (dict): {对象: 应从 IRP001 本金中扣减的净额} —— 存款归属核对
-                       （方式=扣减 记正数、方式=增加 记负数，供 Q9/Q10 使用）
+          dep  (dict): {对象: 净额} —— 存款归属核对：直接加到核对表存款归属
+                       对应项本金（元；方式=增加 记正数、方式=扣减 记负数）
     """
     acct = {}
     dep = {}
@@ -409,12 +428,12 @@ def summarize_adjustments(items):
         if it['scope'] == ADJ_SCOPE_DEP:
             if it['target'] not in ADJ_DEP_TARGETS:
                 continue      # 存款归属核对只支持个人/单位（由 compute 记录提示）
-            # Q 值是"从 IRP001 本金中扣减的金额"：方式=扣减记正数、方式=增加记负数
+            # 存款归属核对：调整值直接加到核对表"存款归属核对"对应项上
             if it['target'] == ADJ_TARGET_BOTH:
-                dep['个人存款'] = dep.get('个人存款', 0.0) - amount
-                dep['单位存款'] = dep.get('单位存款', 0.0) + amount
+                dep['个人存款'] = dep.get('个人存款', 0.0) + amount
+                dep['单位存款'] = dep.get('单位存款', 0.0) - amount
             else:
-                dep[it['target']] = dep.get(it['target'], 0.0) - amount
+                dep[it['target']] = dep.get(it['target'], 0.0) + amount
         elif it['target'] == ADJ_TARGET_BOTH:
             # 一增一减：个人按方式增减，单位同步反向（如个体工商户存款）
             acct[('个人存款', it['field'])] = \
@@ -521,7 +540,14 @@ def _formula_refs(formula):
             for rr in range(int(m.group(2)), int(m.group(4)) + 1):
                 refs.add((col, rr))
     body = _SUM_RANGE_RE.sub('', body)
-    for m in _CELL_RE.finditer(_RANGE_RE.sub('', body)):
+    # 非 SUM 的区间（如 =...+H19:H20-H21）：展开为区间的每个单元格，
+    # 否则依赖排序会漏掉这些单元格，导致取数顺序错误
+    for m in _RANGE_RE.finditer(body):
+        for col in _range_cols(m.group(1), m.group(3)):
+            for rr in range(int(m.group(2)), int(m.group(4)) + 1):
+                refs.add((col, rr))
+    body = _RANGE_RE.sub('', body)
+    for m in _CELL_RE.finditer(body):
         refs.add((m.group(1).upper(), int(m.group(2))))
     return refs
 
@@ -552,10 +578,13 @@ def _eval_formula(formula, values):
                                m.group(3), m.group(4)))
     expr = _SUM_RANGE_RE.sub(_sum_repl, expr)
 
-    # 其余区域引用（如 F7:F7）→ 单格取值
-    expr = _RANGE_RE.sub(
-        lambda m: repr(values.get((m.group(1).upper(), int(m.group(2))), 0.0)),
-        expr)
+    # 其余区域引用（如 H19:H20）→ 区间求和。
+    # 说明：单元格公式里直接写多格区间在 Excel 中会返回 #VALUE!（数组公式），
+    # 这里按"区间求和"容错，避免整格取数丢失；单格区间行为不变。
+    def _range_repl(m):
+        return repr(_sum_range(values, m.group(1), m.group(2),
+                               m.group(3), m.group(4)))
+    expr = _RANGE_RE.sub(_range_repl, expr)
 
     # 函数名（避免与单元格引用冲突）
     expr = expr.replace('ROUND(', '_round(').replace('IF(', '_if(')
@@ -848,11 +877,17 @@ class BaseChecker:
             rows_data[r] = info
 
         # 读取主表全部公式（列位随模板变化，不再按固定列清单读取）
+        # 兼容普通公式与 openpyxl 的 ArrayFormula（数组公式）：
+        # Excel 中误操作产生的数组公式不应让整格取数直接丢失。
         for r in range(1, ws_main.max_row + 1):
             for c in range(1, ws_main.max_column + 1):
                 v = ws_main.cell(r, c).value
-                if isinstance(v, str) and v.strip().startswith('='):
-                    formulas[(get_column_letter(c), r)] = v.strip()
+                if isinstance(v, str):
+                    text = v.strip()
+                else:
+                    text = str(getattr(v, 'text', '') or '').strip()
+                if text.startswith('='):
+                    formulas[(get_column_letter(c), r)] = text
 
         # ---------- Step 2: 明细行取数 ----------
         values = {}
@@ -883,7 +918,7 @@ class BaseChecker:
 
         # ----- 调整项（可自定义的项目列表）-----
         # 会计科目核对类项目 → 汇总后叠加到对应合计项（见 Step 3b）
-        # 存款归属核对类项目 → 汇总写入 Q9/Q10，供校验页比较使用
+        # 存款归属核对类项目 → 汇总后直接加到存款归属对应项本金（见 Step 3b）
         # 说明：模板公式按"调整项行=0"计算基础值，调整额在公式计算之后再叠加，
         #       因此调整额不受模板调整项行是否可定位影响
         acct_adj, dep_adj = summarize_adjustments(self.adjustments)
@@ -932,14 +967,14 @@ class BaseChecker:
                     break
 
         # 调整值写入"差额说明"列前四格（旧模板 Q7~Q10，新模板 P7~P10）：
-        # 既是表格内容，也是校验页公式（存款归属 vs IRP001）的输入项
         #   c1/c2 = 个人侧净调整额（会计科目：本金 / 应付利息）
-        #   c3/c4 = 存款归属核对时从 IRP001 本金中扣减的净额（个人 / 单位）
+        #   c3/c4 = 固定为 0：久悬户调整现在直接写入存款归属表对应项，
+        #           与 IRP001 的比较改为直接比较，不再从 IRP001 扣减 Q9/Q10
         q_values = {
             'c1': acct_adj.get(('个人存款', '本金'), 0.0),
             'c2': acct_adj.get(('个人存款', '应付利息'), 0.0),
-            'c3': dep_adj.get('个人存款', 0.0),
-            'c4': dep_adj.get('单位存款', 0.0),
+            'c3': 0.0,
+            'c4': 0.0,
         }
         # 写入位置：c3/c4 优先取校验页公式实际引用的说明列单元格（模板驱动），
         # 未引用时回退默认行；c1/c2 为附件5 口径的个人侧净调整额（信息项）
@@ -975,7 +1010,7 @@ class BaseChecker:
         for it in normalize_adjustments(self.adjustments):
             if it['scope'] == ADJ_SCOPE_DEP and it['target'] not in ADJ_DEP_TARGETS:
                 self.messages.append(
-                    f"  ⚠ 存款归属核对仅支持个人/单位存款调整项，"
+                    f"  ⚠ A1411、2411合计表调整仅支持个人/单位存款调整项，"
                     f"已忽略「{it['name'] or it['target']}」({it['target']})")
 
         # ---- 3a) 先按模板公式计算基础结果（调整项行按 0 计）----
@@ -984,11 +1019,18 @@ class BaseChecker:
         self.messages.append(f"公式计算: 主表 {len(all_formulas)} 个公式（基础结果）")
 
         # ---- 3b) 再按调整项对相应合计项进行调整，得到最终结果 ----
+        #   · 会计科目核对类：调整会计科目合计（个人/单位/其他合计项）
+        #   · 存款归属核对类：直接调整核对表"存款归属核对"列对应项本金
         total_rows = self._find_total_rows(rows_data, formulas, ws_check)
         adjusted_cells = self._apply_adjustments(values, all_formulas,
                                                  total_rows, acct_adj)
+        dep_rows = self._find_deposit_total_rows(rows_data, formulas,
+                                                 ws_check, layout['dep_amount'],
+                                                 layout.get('dep_name'))
+        adjusted_cells |= self._apply_deposit_adjustments(values, dep_rows,
+                                                          dep_adj)
         if adjusted_cells:
-            # 调整后重算受影响的派生公式（合计列 M、被保险存款合计等）
+            # 调整后重算受影响的派生公式（合计列、境内合计、校验页差额等）
             remaining = {k: v for k, v in all_formulas.items()
                          if k not in adjusted_cells}
             self._eval_formula_pass(values, remaining)
@@ -1221,6 +1263,111 @@ class BaseChecker:
                 f"{abs(net):,.2f} = 最终 {base + net:,.2f}（第{row}行{col}列）")
         return set(adjusted)
 
+    @staticmethod
+    def _find_deposit_total_rows(rows_data, formulas, ws_check, dep_col,
+                                 dep_name_col=None):
+        """
+        定位"A1411、2411合计表"中个人/单位存款的合计行。
+
+        优先按"子项名称"列（模板 D 列，用户模板表头为"子项名称"）的名称
+        精确匹配"（一）个人存款 / （二）单位存款"；这样即使合计行公式被改成
+        数组公式、或公式解析失败，调整值仍能加到正确的行上。
+        名称匹配不到时，再退回校验页公式引用定位。
+
+        参数:
+            rows_data (dict): {行号: 行结构信息}
+            formulas (dict): {(列, 行): 公式}（保底校验用）
+            ws_check: openpyxl 校验页工作表（可为 None）
+            dep_col (str): 存款归属金额列字母
+            dep_name_col (str, optional): 子项名称列字母（默认 D）
+
+        返回:
+            dict: {'个人存款': 行号, '单位存款': 行号}
+        """
+        out = {}
+        want = {'个人存款': '（一）个人存款', '单位存款': '（二）单位存款'}
+        # 1) 按子项名称列匹配（仅取境内汇总行，第一处即可）
+        for target, label in want.items():
+            for r, info in sorted(rows_data.items()):
+                name = str(info.get('f_name') or '').replace(' ', '')
+                if name == label:
+                    out[target] = r
+                    break
+        if len(out) == 2:
+            return out
+        # 2) 退回校验页公式引用（个人/单位存款行的公式中引用的存款归属单元格）
+        if ws_check is not None:
+            ref_re = re.compile(r"!\$?([A-Za-z]{1,3})\$?(\d+)")
+            for r in range(1, ws_check.max_row + 1):
+                label = str(ws_check.cell(r, 1).value or '')
+                if '个人存款' in label:
+                    target = '个人存款'
+                elif '单位存款' in label:
+                    target = '单位存款'
+                else:
+                    continue
+                if target in out:
+                    continue
+                for c in range(2, ws_check.max_column + 1):
+                    v = ws_check.cell(r, c).value
+                    text = v if isinstance(v, str) else str(
+                        getattr(v, 'text', '') or '')
+                    if not text.strip().startswith('='):
+                        continue
+                    for m in ref_re.finditer(text):
+                        if m.group(1).upper() != dep_col:
+                            continue
+                        row = int(m.group(2))
+                        if (dep_col, row) in formulas or (dep_col, row) in rows_data:
+                            out.setdefault(target, row)
+                            break
+                    if target in out:
+                        break
+        return out
+
+    def _apply_deposit_adjustments(self, values, dep_rows, dep_adj):
+        """
+        把"存款归属核对"类调整项直接加到核对表存款归属列对应项本金。
+
+        说明：
+          · 调整项金额单位为元，核对表存款归属金额单位为万元，按 /10000 换算；
+          · 加完后四舍五入到整数万元（与存款归属表"万元"口径一致），
+            避免校验页用 ROUND(IRP001/10000) 比较时因小数产生假差异；
+          · 个人↔单位：个人加、单位减（summarize_adjustments 已折算成净额）。
+
+        参数:
+            values (dict): {(列, 行): 数值}，就地叠加
+            dep_rows (dict): {'个人存款': 行号, '单位存款': 行号}
+            dep_adj (dict): {对象: 净额（元）}
+
+        返回:
+            set[tuple]: 被调整的单元格 {(列, 行)}
+        """
+        adjusted = {}
+        dep_col = self.layout['dep_amount']
+        for target, amount in dep_adj.items():
+            if not amount:
+                continue
+            row = dep_rows.get(target)
+            if row is None:
+                self.messages.append(
+                    f"  ⚠ 未找到「{target}」A1411、2411合计表合计行，"
+                    f"调整 {amount:,.2f} 元未生效")
+                continue
+            base = values.get((dep_col, row), 0.0)
+            new_val = excel_round(base + amount / 10000.0, 0)
+            values[(dep_col, row)] = new_val
+            adjusted[(dep_col, row)] = (target, base, amount)
+        self._dep_adjust_details = adjusted
+        for (col, row), (target, base, amount) in sorted(
+                adjusted.items(), key=lambda kv: kv[0][1]):
+            self.messages.append(
+                f"A1411、2411合计表调整: {target}·本金 第{row}行{col}列 "
+                f"{base:,.2f} 万元 {'+' if amount >= 0 else '-'} "
+                f"{abs(amount) / 10000.0:,.4f} 万元 = "
+                f"{values[(col, row)]:,.0f} 万元")
+        return set(adjusted)
+
     def _find_total_rows(self, rows_data, formulas, ws_check=None):
         """
         定位各"合计项"所在的会计科目合计行。
@@ -1382,7 +1529,7 @@ class BaseChecker:
                                           target=target)
             if detail:
                 _append_comment(ws_main, row, note_idx,
-                                f"存款归属核对调整（从 IRP001 本金中按方式增减）：\n{detail}")
+                                f"A1411、2411合计表调整（已直接加到该表对应项本金）：\n{detail}")
 
     # ----------------------------------------------------------
     # 校验页差额说明
