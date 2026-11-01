@@ -6,8 +6,8 @@
 
 功能说明：
   按《保费基数核对表（模板）》把三块数据填进同一张表：
-    1. 存款归属核对 —— 取自 A1411 / A2411 月报表（万元）
-    2. 会计科目核对 —— 取自科目余额表（元）
+    1. 存款归属表 —— 取自 A1411 / A2411 月报表（万元）
+    2. 会计科目表 —— 取自科目余额表（元）
     3. 被保险存款申报表（IRP001）—— 取自 IRP001 申报表（元）
   各数据块所在列按模板表头自动识别（旧版模板：存款归属 C~F、会计科目 G~M、
   IRP001 N~P；新版附5模板去掉了"符号"列，依次为 C~E、F~L、M~O），
@@ -15,7 +15,7 @@
   高级管理人员/不予保险/被保险存款合计），并把结果固化为静态数值。
 
 与旧版两个生成器的关系：
-  旧版「存款归属表」和「科目余额核对表」是两张独立的表，
+  旧版「会计科目表」和「科目余额核对表」是两张独立的表，
   现合并为一张《保费基数核对表》，本模块取代：
     - deposit_calculator.DepositCalculator 的模板填充逻辑（F 列）
     - account_checker.AccountChecker 的模板填充逻辑（I / L 列）
@@ -29,26 +29,26 @@
 
 调整值（可自定义的调整项列表）：
   每个调整项包含：名称、用途、对象、字段、方式、金额（元）
-    用途：会计科目核对（写入表内"调整项"行，参与会计科目合计）
-          存款归属核对（直接加到核对表"存款归属核对"对应项本金上）
+    用途：会计科目表（写入表内"调整项"行，参与会计科目合计）
+          存款归属表（直接加到核对表"存款归属表"对应项本金上）
     对象：个人存款 / 单位存款
-    字段：本金 / 应付利息（用途=存款归属核对时只比较本金，固定为"本金"）
+    字段：本金 / 应付利息（用途=存款归属表时只比较本金，固定为"本金"）
     方式：增加 / 扣减
   对象可选：
     · 个人存款 / 单位存款 / 个人↔单位（一增一减，个体工商户用）
-    · 会计科目核对表其他合计项：财政性存款 / 非存款类金融机构存款 /
+    · 会计科目表表其他合计项：财政性存款 / 非存款类金融机构存款 /
       高级管理人员 / 不予保险的其他存款（模板无专门调整行，
       调整额直接并入该合计项的公式，上层汇总同步生效）
   项目可自由增删（标准项除外，其 locked=True 不可删除）；
   标准口径（个体工商户 + 久悬户轧差值）为：
-    · 个体工商户本金      会计科目核对 个人↔单位 本金     增加（个人＋、单位－）
-    · 个体工商户利息      会计科目核对 个人↔单位 应付利息 增加（个人＋、单位－）
-    · 久悬户轧差值        会计科目核对 个人存款 本金     增加
-    · 久悬户轧差值        存款归属核对 个人存款 本金     增加
+    · 个体工商户本金      会计科目表 个人↔单位 本金     增加（个人＋、单位－）
+    · 个体工商户利息      会计科目表 个人↔单位 应付利息 增加（个人＋、单位－）
+    · 久悬户轧差值        会计科目表 个人存款 本金     增加
+    · 久悬户轧差值        存款归属表 个人存款 本金     增加
   差额说明列第7/8行保存"由单位调整至个人"的个人侧净额（本金/利息），供外部核对。
 
 单位说明：
-  - A1411/A2411：万元（与存款归属表口径一致，无需换算）
+  - A1411/A2411：万元（与会计科目表口径一致，无需换算）
   - 科目余额表：元
   - IRP001：元
   - 附件：元
@@ -101,7 +101,7 @@ DEFAULT_LAYOUT = {
 }
 
 # 调整值所在行：7~10 行依次为 c1/c2（个人侧净调整额，会计科目）
-# 与 c3/c4（存款归属核对调整额），列位见 layout['note']。
+# 与 c3/c4（存款归属表调整额），列位见 layout['note']。
 ADJ_ROWS = {'c1': 7, 'c2': 8, 'c3': 9, 'c4': 10}
 
 
@@ -110,8 +110,8 @@ def detect_template_layout(get_value):
     按表头文字识别主表各数据块所在列（兼容旧版/新版附5模板）。
 
     识别依据（模板第 4~6 行的表头文字）：
-      · 「存款归属核对」区块 → 子项代码列、本金（金额）列
-      · 「会计科目核对」区块 → 本金/利息各一组 代码/科目名称/金额 列、合计列
+      · 「存款归属表」区块 → 子项代码列、本金（金额）列
+      · 「会计科目表」区块 → 本金/利息各一组 代码/科目名称/金额 列、合计列
       · 「被保险存款申报表」区块 → 本金/利息/合计列
       · 「差额说明」列 → 调整值 c1~c4 所在列
 
@@ -142,10 +142,12 @@ def detect_template_layout(get_value):
 
     try:
         # ---- 1) 第 4 行：四个区块的起始列（兼容新旧表名） ----
-        # 新表名：C4=A1411、2411合计表，F4=存款归属表；旧表名：存款归属核对/会计科目核对
+        # 新表名：C4=存款归属表，F4=会计科目表；旧表名：存款归属表/会计科目表
         dep_start = (find_in_row(4, 'A1411', 1, 40)
                      or find_in_row(4, '存款归属', 1, 40))
         acct_start = (find_in_row(4, '会计科目', 1, 40)
+                      or find_in_row(4, '会计科目表', 1, 40)
+                      # 上一版模板把科目侧表头写成"存款归属表"，需兼容
                       or find_in_row(4, '存款归属表', 1, 40))
         irp_start = find_in_row(4, '被保险存款申报表', 1, 40)
         note_start = find_in_row(4, '差额说明', 1, 40)
@@ -178,7 +180,7 @@ def detect_template_layout(get_value):
         if amount_col:
             layout['dep_amount'] = get_column_letter(amount_col)
 
-        # ---- 3) 会计科目核对：本金/利息两组 代码/科目名称/金额 ----
+        # ---- 3) 会计科目表：本金/利息两组 代码/科目名称/金额 ----
         codes, names, amounts = [], [], []
         for c in range(acct_start, irp_start):
             v = text(6, c)
@@ -227,21 +229,23 @@ def detect_template_layout(get_value):
 # ------------------------------------------------------------
 # 调整项取值范围
 # ------------------------------------------------------------
-ADJ_SCOPE_ACCT = '存款归属表'          # 科目余额表口径（写入表内调整项行）
-ADJ_SCOPE_DEP = 'A1411、2411合计表'     # A1411/A2411 口径（直接加到该表对应项本金）
+ADJ_SCOPE_ACCT = '会计科目表'          # 科目余额表口径（写入表内调整项行）
+ADJ_SCOPE_DEP = '存款归属表'             # A1411/A2411 口径（直接加到该表对应项本金）
 ADJ_SCOPES = (ADJ_SCOPE_ACCT, ADJ_SCOPE_DEP)
-# 旧版用途名称 → 新表名（兼容已保存的调整值配置.json）
+# 旧版用途名称 → 新表名（兼容历史配置文件；"存款归属表"在旧版里指科目侧，
+# 存在同名冲突，因此版本<2 的配置文件由 GUI 载入时另行迁移）
 ADJ_SCOPE_ALIASES = {
     '会计科目核对': ADJ_SCOPE_ACCT,
     '存款归属核对': ADJ_SCOPE_DEP,
+    'A1411、2411合计表': ADJ_SCOPE_DEP,
 }
 ADJ_TARGETS = ('个人存款', '单位存款')
 ADJ_TARGET_BOTH = '个人↔单位'        # 一增一减：个人按方式增减、单位同步反向
-# 会计科目核对表的其他合计项（模板无专门调整行，调整额直接并入该合计公式）
+# 会计科目表表的其他合计项（模板无专门调整行，调整额直接并入该合计公式）
 ADJ_TOTALS = ('财政性存款', '非存款类金融机构存款', '高级管理人员',
               '不予保险的其他存款')
 ADJ_TARGET_OPTIONS = ADJ_TARGETS + (ADJ_TARGET_BOTH,) + ADJ_TOTALS
-# 存款归属核对（校验页 Q9/Q10）只支持个人/单位
+# 存款归属表（校验页 Q9/Q10）只支持个人/单位
 ADJ_DEP_TARGETS = ADJ_TARGETS + (ADJ_TARGET_BOTH,)
 
 # 合计项 → 会计科目名称关键词（用于定位模板中的合计行）
@@ -255,7 +259,7 @@ ADJ_TOTAL_KEYWORDS = {
 }
 ADJ_FIELDS = ('本金', '应付利息')
 ADJ_MODES = ('增加', '扣减')
-ADJ_DEP_FIELD = '本金'               # 存款归属核对只比较本金
+ADJ_DEP_FIELD = '本金'               # 存款归属表只比较本金
 
 # 标准口径的调整项模板：(名称, 用途, 对象, 字段, 方式, 是否标准项)
 # 个体工商户属于"由单位调整至个人"，个人增、单位减由一条记录表达
@@ -294,14 +298,14 @@ def build_default_adjustments(c1=0, c2=0, c3=0, c4=0):
     按标准口径生成调整项列表。
 
     标准项：个体工商户本金/利息 + 久悬户轧差值（会计科目侧、存款归属侧各一条）。
-    久悬户轧差值按"增加"处理：会计科目侧加到会计科目核对表本金，
-    存款归属侧加到存款归属核对表本金（见 compute 的 Step 3b）。
+    久悬户轧差值按"增加"处理：会计科目侧加到会计科目表表本金，
+    存款归属侧加到存款归属表表本金（见 compute 的 Step 3b）。
 
     参数:
         c1 (float): 个体工商户本金（个人增、单位减）
         c2 (float): 个体工商户应付利息（个人增、单位减）
-        c3 (float): 久悬户轧差值 —— 会计科目核对侧（元，方式=增加）
-        c4 (float): 久悬户轧差值 —— 存款归属核对侧（元，方式=增加）
+        c3 (float): 久悬户轧差值 —— 会计科目表侧（元，方式=增加）
+        c4 (float): 久悬户轧差值 —— 存款归属表侧（元，方式=增加）
 
     返回:
         list[dict]: 4 条标准调整项
@@ -317,7 +321,7 @@ def build_default_adjustments(c1=0, c2=0, c3=0, c4=0):
 
 def normalize_adjustments(items):
     """
-    规范化调整项列表：统一取值范围、过滤空行、修正存款归属核对字段。
+    规范化调整项列表：统一取值范围、过滤空行、修正存款归属表字段。
 
     参数:
         items (list[dict]): 调整项列表，每项含
@@ -346,7 +350,7 @@ def normalize_adjustments(items):
         if mode not in ADJ_MODES:
             mode = ADJ_MODES[0]
         if scope == ADJ_SCOPE_DEP:
-            field = ADJ_DEP_FIELD      # 存款归属核对只比较本金
+            field = ADJ_DEP_FIELD      # 存款归属表只比较本金
         if not name and amount == 0:
             continue                   # 空行忽略
         out.append({'name': name, 'scope': scope, 'target': target,
@@ -416,8 +420,8 @@ def summarize_adjustments(items):
 
     返回:
         tuple:
-          acct (dict): {(对象, 字段): 净额} —— 会计科目核对（写入表内调整项行）
-          dep  (dict): {对象: 净额} —— 存款归属核对：直接加到核对表存款归属
+          acct (dict): {(对象, 字段): 净额} —— 会计科目表（写入表内调整项行）
+          dep  (dict): {对象: 净额} —— 存款归属表：直接加到核对表存款归属
                        对应项本金（元；方式=增加 记正数、方式=扣减 记负数）
     """
     acct = {}
@@ -427,8 +431,8 @@ def summarize_adjustments(items):
         amount = sign * it['amount']
         if it['scope'] == ADJ_SCOPE_DEP:
             if it['target'] not in ADJ_DEP_TARGETS:
-                continue      # 存款归属核对只支持个人/单位（由 compute 记录提示）
-            # 存款归属核对：调整值直接加到核对表"存款归属核对"对应项上
+                continue      # 存款归属表只支持个人/单位（由 compute 记录提示）
+            # 存款归属表：调整值直接加到核对表"存款归属表"对应项上
             if it['target'] == ADJ_TARGET_BOTH:
                 dep['个人存款'] = dep.get('个人存款', 0.0) + amount
                 dep['单位存款'] = dep.get('单位存款', 0.0) - amount
@@ -737,11 +741,12 @@ class BaseChecker:
 
     def load_attachments(self, attachment2=None, attachment3=None, attachment4=None):
         """
-        加载附件数据。
+        加载附件数据（附件2/3/4 均为可选）。
 
         附件2（住房公积金）/附件3（社保基金）仅作为参考值记录到日志
         —— 表中公积金/社保金额按模板公式对子项求和，不直接取附件数。
         附件4（高管人员存款）直接填入「三、高级管理人员在本机构存款」行。
+        未提供对应附件时，相应值按 0 处理（不中断生成）。
 
         参数:
             attachment2 (str, optional): 附件2 路径
@@ -751,13 +756,22 @@ class BaseChecker:
         if attachment2:
             self.att2_value = _read_attachment_total(str(attachment2))
             self.messages.append(f"附件2(住房公积金)本金合计: {self.att2_value:,.2f} 元（参考）")
+        else:
+            self.att2_value = 0.0
+            self.messages.append("附件2(住房公积金)未提供，按 0 处理（参考值）")
         if attachment3:
             self.att3_value = _read_attachment_total(str(attachment3))
             self.messages.append(f"附件3(社保基金)本金合计: {self.att3_value:,.2f} 元（参考）")
+        else:
+            self.att3_value = 0.0
+            self.messages.append("附件3(社保基金)未提供，按 0 处理（参考值）")
         if attachment4:
             p, i = _read_attachment_summary(str(attachment4))
             self.att4_p, self.att4_i = p, i
             self.messages.append(f"附件4(高管人员): 本金={p:,.2f}, 利息={i:,.2f} 元")
+        else:
+            self.att4_p, self.att4_i = 0.0, 0.0
+            self.messages.append("附件4(高管人员)未提供，高管人员存款按 0 处理")
 
     def set_adjustments(self, items):
         """
@@ -766,8 +780,8 @@ class BaseChecker:
         参数:
             items (list[dict]): 调整项列表，每项含
                 name    名称（自定义）
-                scope   用途：ADJ_SCOPE_ACCT（会计科目核对）
-                             / ADJ_SCOPE_DEP（存款归属核对）
+                scope   用途：ADJ_SCOPE_ACCT（会计科目表）
+                             / ADJ_SCOPE_DEP（存款归属表）
                 target  对象：个人存款 / 单位存款
                 field   字段：本金 / 应付利息
                 mode    方式：增加 / 扣减
@@ -917,8 +931,8 @@ class BaseChecker:
             f"科目利息({layout['acct_i_amount']})={filled_l}行")
 
         # ----- 调整项（可自定义的项目列表）-----
-        # 会计科目核对类项目 → 汇总后叠加到对应合计项（见 Step 3b）
-        # 存款归属核对类项目 → 汇总后直接加到存款归属对应项本金（见 Step 3b）
+        # 会计科目表类项目 → 汇总后叠加到对应合计项（见 Step 3b）
+        # 存款归属表类项目 → 汇总后直接加到存款归属对应项本金（见 Step 3b）
         # 说明：模板公式按"调整项行=0"计算基础值，调整额在公式计算之后再叠加，
         #       因此调整额不受模板调整项行是否可定位影响
         acct_adj, dep_adj = summarize_adjustments(self.adjustments)
@@ -931,27 +945,30 @@ class BaseChecker:
         self._adj_rows = adj_rows
         self.messages.append(
             f"调整项: 共{len(normalize_adjustments(self.adjustments))}项, "
-            f"会计科目核对 {len(acct_adj)} 个口径, 存款归属核对 个人={dep_adj.get('个人存款', 0):,.2f} "
+            f"会计科目表 {len(acct_adj)} 个口径, 存款归属表 个人={dep_adj.get('个人存款', 0):,.2f} "
             f"单位={dep_adj.get('单位存款', 0):,.2f}")
         for text in self._adjustment_log_lines():
             self.messages.append(text)
 
         # 高级管理人员存款（附件4）：定位"高级管理人员"明细行填入会计科目金额列。
+        # 附件4 为可选文件：未提供时按 0 填入（att4_p/att4_i 已初始化为 0）。
         # 注意模板中既有汇总行（带公式）也有明细行，只填明细行，避免覆盖汇总公式。
-        if self.att4_p is not None:
-            target = None
-            for r, info in rows_data.items():
-                if ('高级管理人员' in info['p_name'] or '高级管理人员' in info['i_name']) \
-                        and (layout['acct_p_amount'], r) not in formulas:
-                    target = r
-                    break
-            if target is None:
-                self.messages.append("  ⚠ 未找到「高级管理人员」明细行，附件4 未填入")
-            else:
-                values[(layout['acct_p_amount'], target)] = round(self.att4_p, 2)
-                values[(layout['acct_i_amount'], target)] = round(
-                    self.att4_i or 0.0, 2)
-                self.messages.append(f"高级管理人员存款 (R{target}): 按附件4填入")
+        target = None
+        for r, info in rows_data.items():
+            if ('高级管理人员' in info['p_name'] or '高级管理人员' in info['i_name']) \
+                    and (layout['acct_p_amount'], r) not in formulas:
+                target = r
+                break
+        if target is None:
+            self.messages.append("  ⚠ 未找到「高级管理人员」明细行，附件4 未填入")
+        else:
+            values[(layout['acct_p_amount'], target)] = round(
+                self.att4_p or 0.0, 2)
+            values[(layout['acct_i_amount'], target)] = round(
+                self.att4_i or 0.0, 2)
+            self.messages.append(
+                f"高级管理人员存款 (R{target}): 按附件4填入"
+                + ("（附件4未提供，按0）" if not self.att4_p else ""))
 
         # IRP001（本金/利息列）：按行标签匹配申报表项目
         for r, info in rows_data.items():
@@ -968,7 +985,7 @@ class BaseChecker:
 
         # 调整值写入"差额说明"列前四格（旧模板 Q7~Q10，新模板 P7~P10）：
         #   c1/c2 = 个人侧净调整额（会计科目：本金 / 应付利息）
-        #   c3/c4 = 固定为 0：久悬户调整现在直接写入存款归属表对应项，
+        #   c3/c4 = 固定为 0：久悬户调整现在直接写入会计科目表对应项，
         #           与 IRP001 的比较改为直接比较，不再从 IRP001 扣减 Q9/Q10
         q_values = {
             'c1': acct_adj.get(('个人存款', '本金'), 0.0),
@@ -1006,11 +1023,11 @@ class BaseChecker:
         # 程序不内置任何计算公式
         all_formulas = dict(formulas)
 
-        # 存款归属核对不支持"合计项"调整，提示忽略
+        # 存款归属表不支持"合计项"调整，提示忽略
         for it in normalize_adjustments(self.adjustments):
             if it['scope'] == ADJ_SCOPE_DEP and it['target'] not in ADJ_DEP_TARGETS:
                 self.messages.append(
-                    f"  ⚠ A1411、2411合计表调整仅支持个人/单位存款调整项，"
+                    f"  ⚠ 存款归属表调整仅支持个人/单位存款调整项，"
                     f"已忽略「{it['name'] or it['target']}」({it['target']})")
 
         # ---- 3a) 先按模板公式计算基础结果（调整项行按 0 计）----
@@ -1019,8 +1036,8 @@ class BaseChecker:
         self.messages.append(f"公式计算: 主表 {len(all_formulas)} 个公式（基础结果）")
 
         # ---- 3b) 再按调整项对相应合计项进行调整，得到最终结果 ----
-        #   · 会计科目核对类：调整会计科目合计（个人/单位/其他合计项）
-        #   · 存款归属核对类：直接调整核对表"存款归属核对"列对应项本金
+        #   · 会计科目表类：调整会计科目合计（个人/单位/其他合计项）
+        #   · 存款归属表类：直接调整核对表"存款归属表"列对应项本金
         total_rows = self._find_total_rows(rows_data, formulas, ws_check)
         adjusted_cells = self._apply_adjustments(values, all_formulas,
                                                  total_rows, acct_adj)
@@ -1225,7 +1242,7 @@ class BaseChecker:
 
     def _apply_adjustments(self, values, formulas, total_rows, acct_adj):
         """
-        按调整项对"会计科目核对"各合计项进行调整（最终结果 = 模板公式结果 + 调整额）。
+        按调整项对"会计科目表"各合计项进行调整（最终结果 = 模板公式结果 + 调整额）。
 
         参数:
             values (dict): {(列, 行): 数值}，就地叠加
@@ -1267,7 +1284,7 @@ class BaseChecker:
     def _find_deposit_total_rows(rows_data, formulas, ws_check, dep_col,
                                  dep_name_col=None):
         """
-        定位"A1411、2411合计表"中个人/单位存款的合计行。
+        定位"存款归属表"中个人/单位存款的合计行。
 
         优先按"子项名称"列（模板 D 列，用户模板表头为"子项名称"）的名称
         精确匹配"（一）个人存款 / （二）单位存款"；这样即使合计行公式被改成
@@ -1327,11 +1344,11 @@ class BaseChecker:
 
     def _apply_deposit_adjustments(self, values, dep_rows, dep_adj):
         """
-        把"存款归属核对"类调整项直接加到核对表存款归属列对应项本金。
+        把"存款归属表"类调整项直接加到核对表存款归属列对应项本金。
 
         说明：
           · 调整项金额单位为元，核对表存款归属金额单位为万元，按 /10000 换算；
-          · 加完后四舍五入到整数万元（与存款归属表"万元"口径一致），
+          · 加完后四舍五入到整数万元（与会计科目表"万元"口径一致），
             避免校验页用 ROUND(IRP001/10000) 比较时因小数产生假差异；
           · 个人↔单位：个人加、单位减（summarize_adjustments 已折算成净额）。
 
@@ -1351,7 +1368,7 @@ class BaseChecker:
             row = dep_rows.get(target)
             if row is None:
                 self.messages.append(
-                    f"  ⚠ 未找到「{target}」A1411、2411合计表合计行，"
+                    f"  ⚠ 未找到「{target}」存款归属表合计行，"
                     f"调整 {amount:,.2f} 元未生效")
                 continue
             base = values.get((dep_col, row), 0.0)
@@ -1362,7 +1379,7 @@ class BaseChecker:
         for (col, row), (target, base, amount) in sorted(
                 adjusted.items(), key=lambda kv: kv[0][1]):
             self.messages.append(
-                f"A1411、2411合计表调整: {target}·本金 第{row}行{col}列 "
+                f"存款归属表调整: {target}·本金 第{row}行{col}列 "
                 f"{base:,.2f} 万元 {'+' if amount >= 0 else '-'} "
                 f"{abs(amount) / 10000.0:,.4f} 万元 = "
                 f"{values[(col, row)]:,.0f} 万元")
@@ -1529,7 +1546,7 @@ class BaseChecker:
                                           target=target)
             if detail:
                 _append_comment(ws_main, row, note_idx,
-                                f"A1411、2411合计表调整（已直接加到该表对应项本金）：\n{detail}")
+                                f"存款归属表调整（已直接加到该表对应项本金）：\n{detail}")
 
     # ----------------------------------------------------------
     # 校验页差额说明
@@ -1602,7 +1619,7 @@ def _is_sub_code(text):
     """
     判断 C 列取值是否为存款归属子项代码（如 "12MI1/22MI1"、"22MMU"）。
 
-    表头行的"子项代码""存款归属核对"等中文文本不算代码，
+    表头行的"子项代码""存款归属表"等中文文本不算代码，
     避免被误当成代码去取数。
     """
     return bool(re.fullmatch(r'[0-9A-Za-z]+(/[0-9A-Za-z]+)?', text or ''))

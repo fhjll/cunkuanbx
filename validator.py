@@ -11,35 +11,35 @@
        - 交叉校验：IRP002 vs IRP001 各项目数据一致性检查
 
   2. validate_base_check_vs_irp001()  — 保费基数核对表 vs IRP001 校验
-       - A1411、2411合计表（本金金额列，万元）与 IRP001 本金（精确至万元）比较
-       - 存款归属表（本金/利息/合计，元）与 IRP001 本金/利息/合计比较
+       - 存款归属表（本金金额列，万元）与 IRP001 本金（精确至万元）比较
+       - 会计科目表（本金/利息/合计，元）与 IRP001 本金/利息/合计比较
        （各列列位按核对表表头自动识别，新旧附5模板均支持）
 
   3. generate_validation_report()     — 生成全面校验报告（Excel）
-       - 以 IRP001 为基准，逐项输出 A1411、2411合计表（B列）、
-         存款归属表（C/D/E列）、IRP002（F/G/H列）的差额，不一致标红
+       - 以 IRP001 为基准，逐项输出 存款归属表（B列）、
+         会计科目表（C/D/E列）、IRP002（F/G/H列）的差额，不一致标红
        - 存款归属 vs IRP001（本金）：IRP001 本金先扣久悬户调整额再比较
          （个人=c3、单位=c4）；会计科目（被保险存款生成表）vs IRP001
          不做该调整，直接比较
 
 校验逻辑（与《保费基数核对表（模板）》校验页一致）：
-  - 存款归属核对：先对子项数据取数（A1411/A2411 按子项代码逐项取数），
+  - 存款归属表：先对子项数据取数（A1411/A2411 按子项代码逐项取数），
     再按模板公式计算合并（个人/单位/财政性/非存款类各合计），
     最后与 IRP001 比较：
       个人存款：F7 = ROUND((IRP001个人本金 - c3) / 10000)
       单位存款：F8 = ROUND((IRP001单位本金 - c4) / 10000)
       财政性 / 非存款类：F11 = ROUND(IRP001本金 / 10000) 等
-  - 会计科目核对：科目余额按科目代码逐项取数 → 按模板公式计算合并
+  - 会计科目表：科目余额按科目代码逐项取数 → 按模板公式计算合并
     （个体工商户调整项已在表中通过"＋/－"行体现），
     再与 IRP001 的本金/应付利息/合计比较，绝对容差 0.001 元。
   - 每一组比较均采用"一致→0，不一致→差额"的报告口径。
 
 调整项说明（可自定义增减，均以元为单位）：
   每个调整项含 名称 / 用途 / 对象 / 字段 / 方式 / 金额：
-  - 用途=会计科目核对：生成核对表时写入表内"调整项"行
+  - 用途=会计科目表：生成核对表时写入表内"调整项"行
     （个人行按方式计入个人存款合计、单位行按方式计入单位存款合计），
     差额说明列第7/8行保存个人侧净调整额（本金/利息）供外部核对
-  - 用途=存款归属核对：按方式汇总到差额说明列第9（个人）/10（单位）行，
+  - 用途=存款归属表：按方式汇总到差额说明列第9（个人）/10（单位）行，
     校验时从 IRP001 本金中扣减后再与存款归属（A1411/A2411）比较
   标准口径 = 个体工商户本金/利息（个人增、单位减）+ 个人/单位久悬户（扣减）
 
@@ -339,11 +339,11 @@ def _read_base_check_map(filepath):
     读取《保费基数核对表》(已生成) 的三大数据块。
 
     各数据块所在列按模板表头自动识别（兼容旧版/新版附5模板）：
-      存款归属核对：子项代码 / 子项名称 / 本金金额（万元）
-      会计科目核对：本金（代码/科目名称/金额）、利息（代码/科目名称/金额）、合计
+      存款归属表：子项代码 / 子项名称 / 本金金额（万元）
+      会计科目表：本金（代码/科目名称/金额）、利息（代码/科目名称/金额）、合计
       被保险存款申报表（IRP001）：本金 / 应付利息 / 合计
       差额说明列前四格（第7~10行）：c1/c2 个人侧净调整额，
-                                    c3/c4 存款归属核对调整额
+                                    c3/c4 存款归属表调整额
 
     参数:
         filepath (str): 保费基数核对表_已生成.xlsx 路径
@@ -371,7 +371,7 @@ def _read_base_check_map(filepath):
            'adjust_rows': {}, 'layout': layout}
 
     # 调整值（"差额说明"列第 7~10 行）：
-    #   c1/c2=个人侧净调整额（会计科目），c3/c4=存款归属核对调整额
+    #   c1/c2=个人侧净调整额（会计科目），c3/c4=存款归属表调整额
     for key, row in ADJ_ROWS.items():
         out['adjust'][key] = to_float(ws.cell(row, col['note']).value)
 
@@ -393,7 +393,7 @@ def _read_base_check_map(filepath):
         elif '境内存款' in b_name:
             section = '境内'
 
-        # 存款归属核对（本金金额列，万元）
+        # 存款归属表（本金金额列，万元）
         # 同一标签可能先出现合计行、后出现明细行（新模板"住房公积金存款"
         # 合计在 D9，明细在 D54~D62），已取到数值后不再被明细行覆盖
         label = _deposit_label(section, b_name, d_name)
@@ -412,7 +412,7 @@ def _read_base_check_map(filepath):
                 if key:
                     out['adjust_rows'][key] = vals
 
-        # ---- 会计科目核对（本金/利息/合计金额列，元）----
+        # ---- 会计科目表（本金/利息/合计金额列，元）----
         if h_name or k_name:
             a_label = _acct_label(h_name)
             if a_label and a_label not in out['acct']:
@@ -466,7 +466,7 @@ def _read_base_check_map(filepath):
 
 def _deposit_label(section, b_name, d_name):
     """
-    由行标签推断"存款归属核对"所属项目。
+    由行标签推断"存款归属表"所属项目。
 
     表内行标签有两类：一是计算行/合计行（名称在 D 列，
     如"（一）个人存款""境内存款合计"），二是明细行（不在本函数返回）。
@@ -500,7 +500,7 @@ def _deposit_label(section, b_name, d_name):
 
 
 def _acct_label(name):
-    """由"会计科目核对"科目名称推断项目标签"""
+    """由"会计科目表"科目名称推断项目标签"""
     if not name:
         return None
     for kw, label in (
@@ -532,15 +532,15 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
     """
     校验《保费基数核对表》(已生成) 与 IRP001 的数据一致性。
 
-    校验逻辑（沿用原存款归属表/科目余额表两项校验的口径，合并为一次）：
+    校验逻辑（沿用原会计科目表/科目余额表两项校验的口径，合并为一次）：
       1. 先对子项数据取数、再按模板公式计算合并（已在生成表内完成）
-      2. 存款归属核对（F 列，万元）与 IRP001 本金比较：
+      2. 存款归属表（F 列，万元）与 IRP001 本金比较：
            各分项均按 ROUND(IRP001本金 / 10000) 比较（四舍五入至万元），
            差额≠0 即不一致。
-           久悬户调整值已在生成核对表时直接加到存款归属表对应项，
+           久悬户调整值已在生成核对表时直接加到会计科目表对应项，
            因此这里直接比较，不再扣减 Q9/Q10。
-      3. 会计科目核对（I/L/M 列，元）与 IRP001 本金/利息/合计比较：
-           绝对容差 0.001 元（"用途=会计科目核对"的调整项已在表内
+      3. 会计科目表（I/L/M 列，元）与 IRP001 本金/利息/合计比较：
+           绝对容差 0.001 元（"用途=会计科目表"的调整项已在表内
            "调整项"行体现，此处不再重复调整）
       4. 当提供 IRP001 文件时，同时核对表中 N/O 列取数是否与申报表一致
       5. 当提供调整项时，核对表内"调整项"行与配置是否一致
@@ -568,12 +568,12 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
     items = normalize_adjustments(adjustments) if adjustments else []
 
     msgs.append("========== 保费基数核对表 vs IRP001 校验 ==========")
-    msgs.append("久悬户调整值已直接计入核对表（A1411、2411合计表/存款归属表），"
+    msgs.append("久悬户调整值已直接计入核对表（存款归属表/会计科目表），"
                 "本次按表内数值直接比较")
 
-    # ---- (1) 存款归属核对 vs IRP001 ----
+    # ---- (1) 存款归属表 vs IRP001 ----
     msgs.append("")
-    msgs.append("--- （1）A1411、2411合计表 vs IRP001（模板校验页 B/C 列口径，单位：万元）---")
+    msgs.append("--- （1）存款归属表 vs IRP001（模板校验页 B/C 列口径，单位：万元）---")
     dep_items = [
         ('（一）个人存款', '（一）个人存款'),
         ('（二）单位存款', '（二）单位存款'),
@@ -597,9 +597,9 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
             f"IRP001={expect:,.0f}万元  "
             f"差额={diff:,.0f}万元  [{'一致' if ok else '不一致'}]")
 
-    # ---- (2) 会计科目核对 vs IRP001 ----
+    # ---- (2) 会计科目表 vs IRP001 ----
     msgs.append("")
-    msgs.append("--- （2）存款归属表 vs IRP001（元，容差 0.001 元）---")
+    msgs.append("--- （2）会计科目表 vs IRP001（元，容差 0.001 元）---")
     acct_items = [
         ('（一）个人存款', '（一）个人存款'),
         ('（二）单位存款', '（二）单位存款'),
@@ -663,7 +663,7 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
             msgs.append(f"  ERROR: 无法读取 IRP001: {e}")
 
     # ---- (4) 表内调整项核对 ----
-    # "用途=会计科目核对"的调整项在生成核对表时写入表内"调整项"行，
+    # "用途=会计科目表"的调整项在生成核对表时写入表内"调整项"行，
     # 并已计入个人/单位存款合计；此处核对表内数值与调整项配置是否一致。
     if items:
         msgs.append("")
@@ -934,6 +934,45 @@ def _cmp_text(left_name, left_val, right_name, right_val, tol, unit='元'):
             f"{right_name} {right_val:,.2f} {unit}"), True
 
 
+def _irp002_result_text(label, irp001_item, irp002_item):
+    """
+    生成"IRP001与IRP002校验"单列结果文本。
+
+    参数:
+        label (str): 报告行项目名称
+        irp001_item (dict or None): IRP001 数据 {principal, interest, total}
+        irp002_item (dict or None): IRP002 数据 {principal, interest, total, count}
+
+    返回:
+        tuple: (文本, 是否不一致)
+    """
+    if not irp001_item or not irp002_item:
+        return NO_DATA_TEXT, False
+    # 户数行：IRP002 户数合计 vs IRP001 户数（IRP001 存在本金列）
+    if '客户数' in label:
+        left = irp002_item.get('count', 0.0) or 0.0
+        right = irp001_item.get('principal', 0.0) or 0.0
+        if abs(left - right) <= TOL_YUAN:
+            return MATCH_TEXT, False
+        return (f"户数不一致：IRP002 {left:,.0f} 户 / IRP001 {right:,.0f} 户",
+                True)
+    parts = []
+    for field, fname in (('principal', '本金'), ('interest', '利息'),
+                         ('total', '合计')):
+        lv = irp002_item.get(field)
+        rv = irp001_item.get(field)
+        if lv is None or rv is None:
+            continue
+        if field == 'total' and not rv:
+            # 受保存款等只有本金口径：IRP001 合计为空时用其本金比较
+            rv = irp001_item.get('principal', 0.0)
+        if not _diff_ok(lv, rv):
+            parts.append(f"{fname} IRP002 {lv:,.2f} / IRP001 {rv:,.2f}")
+    if parts:
+        return "不一致（" + "；".join(parts) + "）", True
+    return MATCH_TEXT, False
+
+
 def _resolve_report_template(base_check_path=None, template_path=None):
     """
     定位校验报告模板（支持工作目录/模板 覆盖，与核对表模板同一套查找规则）。
@@ -960,11 +999,11 @@ def generate_validation_report(irp001_path, output_path,
 
     表格结构（模板固定）：
       A 列  = 项目名称
-      B 列  = 存款归属核对（本金，万元） 与 会计科目核对（本金，万元）的比较
-      C~E 列= 存款归属核对 与 IRP001（本金 / 利息 / 合计）的比较
-              久悬户调整值已在生成核对表时直接加到存款归属表对应项，
+      B 列  = 存款归属表（本金，万元） 与 会计科目表（本金，万元）的比较
+      C~E 列= 存款归属表 与 IRP001（本金 / 利息 / 合计）的比较
+              久悬户调整值已在生成核对表时直接加到会计科目表对应项，
               因此这里直接按万元比较，不再扣减 Q9/Q10
-      F~H 列= 会计科目核对（被保险存款生成表）与 IRP001 的比较
+      F~H 列= 会计科目表（被保险存款生成表）与 IRP001 的比较
               同样直接比较（会计科目调整值已在生成核对表时计入了表内）
       （模板若另有 I~K 列（IRP002 块），则填 IRP002 与 IRP001 的比较）
 
@@ -1013,9 +1052,9 @@ def generate_validation_report(irp001_path, output_path,
     else:
         msgs.append("  保费基数核对表: 未提供（存款归属/会计科目列将填“无对应数据”）")
 
-    # 说明：久悬户调整值已在生成核对表时直接写入存款归属表/会计科目表，
+    # 说明：久悬户调整值已在生成核对表时直接写入会计科目表/会计科目表，
     #       因此本报告直接比较表内数值与 IRP001，不再扣减 Q9/Q10。
-    msgs.append("  久悬户调整值已计入核对表（A1411、2411合计表/存款归属表），本次直接比较")
+    msgs.append("  久悬户调整值已计入核对表（存款归属表/会计科目表），本次直接比较")
 
     # ---- 打开模板 ----
     tpl_path = _resolve_report_template(base_check_path, template_path)
@@ -1047,6 +1086,13 @@ def generate_validation_report(irp001_path, output_path,
     # 是否含 IRP002 区块：以表头行 3 的 I/J/K 标题为准（避免模板中零散误输入）
     has_irp002_cols = all(str(ws.cell(3, c).value or '').strip()
                           for c in (9, 10, 11))
+    # 单列"IRP001与IRP002校验"：在第 2 行表头中查找，列位模板驱动
+    irp2check_col = None
+    for c in range(1, ws.max_column + 2):
+        title = str(ws.cell(2, c).value or '')
+        if 'IRP001' in title and 'IRP002' in title:
+            irp2check_col = c
+            break
 
     for r in range(1, ws.max_row + 1):
         label = str(ws.cell(r, 1).value or '').strip()
@@ -1090,7 +1136,7 @@ def generate_validation_report(irp001_path, output_path,
                 if a_principal is not None:
                     b_right = excel_round(a_principal / 10000.0, 0)
             b_left = excel_round(d_val, 0)
-            b_text, b_err = _cmp_text('A1411、2411合计表', b_left, '存款归属表', b_right,
+            b_text, b_err = _cmp_text('存款归属表', b_left, '会计科目表', b_right,
                                       TOL_WAN, '万元')
         _write_report_cell(ws, r, 2, b_text, b_err)
         tally(b_text)
@@ -1112,7 +1158,7 @@ def generate_validation_report(irp001_path, output_path,
             if abs(dep_wan - irp_wan) <= TOL_WAN:
                 c_text, c_err = MATCH_TEXT, False
             else:
-                c_text = (f"A1411、2411合计表 {dep_wan:,.0f} 万元 / "
+                c_text = (f"存款归属表 {dep_wan:,.0f} 万元 / "
                           f"IRP001 {irp_wan:,.0f} 万元")
                 c_err = True
         else:
@@ -1133,6 +1179,11 @@ def generate_validation_report(irp001_path, output_path,
             text, err = _cmp_text(left_name, l_val, 'IRP001', r_val, TOL_YUAN, '元')
             _write_report_cell(ws, r, col, text, err)
             tally(text)
+
+        # 最后一列：IRP001 与 IRP002 校验结果（汇总本金/利息/合计/户数）
+        if irp2check_col:
+            text, err = _irp002_result_text(label, i1, i2)
+            _write_report_cell(ws, r, irp2check_col, text, err)
 
         # I~K 列（模板若存在 IRP002 块）：IRP002 vs IRP001
         if has_irp002_cols:
@@ -1174,11 +1225,13 @@ def generate_validation_report(irp001_path, output_path,
         if v.startswith('说明'):
             cell = ws.cell(r, 1)
             cell.value = (
-                "说明：B列＝A1411、2411合计表与存款归属表（本金，万元）比较；"
-                "C~E列＝A1411、2411合计表与IRP001（本金/利息/合计）比较；"
-                "F~H列＝存款归属表与IRP001（本金/利息/合计）比较"
-                + ("；I~K列＝IRP002与IRP001比较" if has_irp002_cols else "") +
-                "。填写约定：无对应数据＝该口径没有这项数据；核对一致＝在容差内相等"
+                "说明：B列＝存款归属表与会计科目表（本金，万元）比较；"
+                "C~E列＝存款归属表与IRP001（本金/利息/合计）比较；"
+                "F~H列＝会计科目表与IRP001（本金/利息/合计）比较"
+                + ("；I~K列＝IRP002与IRP001比较" if has_irp002_cols else "")
+                + ("；最后一列＝IRP001与IRP002校验结果（核对一致/不一致/无对应数据）"
+                   if irp2check_col else "")
+                + "。填写约定：无对应数据＝该口径没有这项数据；核对一致＝在容差内相等"
                 f"（元级 {TOL_YUAN:g} 元）；核对不一致＝列出双方数值（红色底）。")
             cell.font = Font(name='微软雅黑', size=9, italic=True, color="666666")
             cell.alignment = Alignment(horizontal='left', vertical='center')
@@ -1187,6 +1240,9 @@ def generate_validation_report(irp001_path, output_path,
     ws.column_dimensions['A'].width = 26
     for col in 'BCDEFGHIJK':
         ws.column_dimensions[col].width = 30
+    if irp2check_col:
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(irp2check_col)].width = 60
 
     wb.save(str(output_path))
     wb.close()

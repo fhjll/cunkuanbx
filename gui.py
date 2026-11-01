@@ -14,8 +14,8 @@
   第四部分 — 运行日志（黑色背景的日志输出区）
 
 3个主要操作（需按顺序执行）：
-  1. 生成保费基数核对表 — 合并模板：存款归属核对（A1411/A2411）+
-                           会计科目核对（科目余额表）+ IRP001 申报数据
+  1. 生成保费基数核对表 — 合并模板：存款归属表（A1411/A2411）+
+                           会计科目表（科目余额表）+ IRP001 申报数据
   2. 执行数据校验       — IRP002 校验 + 保费基数核对表 vs IRP001 校验
   3. 生成校验报告       — 输出跨数据源交叉校验的 Excel 报告
 
@@ -24,7 +24,7 @@
 
 关键特性：
   - 智能文件匹配：根据文件名关键词自动匹配所需文件
-  - 调整项可自由增删：每项配置用途（会计科目核对/存款归属核对）、
+  - 调整项可自由增删：每项配置用途（会计科目表/存款归属表）、
     对象（个人存款/单位存款）、字段（本金/应付利息）、方式（增加/扣减）
     与金额；配置保存在工作目录的调整值配置.json，也可从附件5一键读取
   - 支持手动选择文件路径（兜底方案）
@@ -115,13 +115,13 @@ FILE_DEFS = [
     {'key': 'irp002',     'label': 'IRP002 申报表',
      'patterns': ['irp002', 'IRP002'],
      'exts': ['.xls', '.xlsx'], 'required': False},
-    {'key': 'att2',       'label': '附件2：住房公积金明细表',
+    {'key': 'att2',       'label': '附件2：住房公积金明细表（可选）',
      'patterns': ['附件2', '住房公积金明细'],
      'exts': ['.xls', '.xlsx'], 'required': False},
-    {'key': 'att3',       'label': '附件3：社保基金存款明细表',
+    {'key': 'att3',       'label': '附件3：社保基金存款明细表（可选）',
      'patterns': ['附件3', '社保基金存款明细'],
      'exts': ['.xls', '.xlsx'], 'required': False},
-    {'key': 'att4',       'label': '附件4：高管人员存款统计表',
+    {'key': 'att4',       'label': '附件4：高管人员存款统计表（可选）',
      'patterns': ['附件4', '高管人员存款统计'],
      'exts': ['.xls', '.xlsx'], 'required': False},
 ]
@@ -349,7 +349,7 @@ class ValidationSeqThread(QThread):
             else:
                 all_msgs.append("[跳过] IRP002 文件未找到")
 
-            # 校验2: 保费基数核对表 vs IRP001（存款归属核对 + 会计科目核对）
+            # 校验2: 保费基数核对表 vs IRP001（存款归属表 + 会计科目表）
             if self.base_check_path and self.irp001_path:
                 self.progress.emit("正在校验 保费基数核对表 vs IRP001...")
                 msgs = validate_base_check_vs_irp001(
@@ -718,8 +718,8 @@ class MainWindow(QMainWindow):
         adj_layout.setSpacing(6)
 
         tip = QLabel(
-            "用途「存款归属表」：调整存款归属表合计（写入表内调整项行）；"
-            "用途「A1411、2411合计表」：直接把调整值加到该表对应项本金。\n"
+            "用途「会计科目表」：调整会计科目表合计（写入表内调整项行）；"
+            "用途「存款归属表」：直接把调整值加到该表对应项本金。\n"
             "对象选「个人↔单位」表示一增一减（个人增、单位减），"
             "个体工商户即用此项；对象也可选财政性存款等其他合计项，"
             "调整额会并入该合计项。名称可自由填写，标准项不可删除。"
@@ -945,8 +945,14 @@ class MainWindow(QMainWindow):
                         widgets['status'].setStyleSheet("color:#e74c3c;")
                 else:
                     widgets['path_edit'].setText("")
-                    widgets['status'].setText("✗ 未找到")
-                    widgets['status'].setStyleSheet("color:#e74c3c;")
+                    fd = next((f for f in FILE_DEFS if f['key'] == key), None)
+                    if fd and not fd.get('required'):
+                        # 可选项（附件2/3/4、IRP002、附件5 等）：未找到不影响生成
+                        widgets['status'].setText("（可选）未找到")
+                        widgets['status'].setStyleSheet("color:#f39c12;")
+                    else:
+                        widgets['status'].setText("✗ 未找到")
+                        widgets['status'].setStyleSheet("color:#e74c3c;")
 
         # 临时/锁文件提示（WPS/Excel 打开文件时产生）
         temp_files = [f for f in (os.listdir(folder) if folder and os.path.isdir(folder) else [])
@@ -1000,7 +1006,7 @@ class MainWindow(QMainWindow):
             if col == 2:
                 combo.setToolTip("个人↔单位：个人按方式增减、单位同步反向（一增一减）")
             self.tb_adj.setCellWidget(row, col, combo)
-        # 用途切换时联动"字段"（存款归属核对只比较本金）。
+        # 用途切换时联动"字段"（存款归属表只比较本金）。
         # 注意：回调按控件定位行号（行号会随增删变化），不能用建行时的行号。
         scope_combo = self.tb_adj.cellWidget(row, 1)
         scope_combo.currentTextChanged.connect(
@@ -1027,9 +1033,9 @@ class MainWindow(QMainWindow):
         """
         用途选择联动：
 
-        · 存款归属核对 → 字段固定为本金并禁用；对象只保留个人/单位
+        · 存款归属表 → 字段固定为本金并禁用；对象只保留个人/单位
           （校验页只对这两项做久悬户调整）
-        · 会计科目核对 → 字段可选；对象含各合计项
+        · 会计科目表 → 字段可选；对象含各合计项
         """
         scope_combo = self.tb_adj.cellWidget(row, 1)
         field_combo = self.tb_adj.cellWidget(row, 3)
@@ -1171,15 +1177,33 @@ class MainWindow(QMainWindow):
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             items = data.get('items') if isinstance(data, dict) else data
+            # 旧版配置（无 version 字段）里"存款归属表"指科目侧、"A1411、2411合计表"
+            # 指 A1411/A2411 侧；新表名已互换，这里按版本迁移后再规范化
+            version = data.get('version', 1) if isinstance(data, dict) else 1
+            if items and version < 2:
+                legacy_scope = {
+                    'A1411、2411合计表': ADJ_SCOPE_DEP,
+                    '存款归属表': ADJ_SCOPE_ACCT,
+                    '会计科目核对': ADJ_SCOPE_ACCT,
+                    '存款归属核对': ADJ_SCOPE_DEP,
+                }
+                migrated = 0
+                for it in items:
+                    sc = it.get('scope')
+                    if sc in legacy_scope and legacy_scope[sc] != sc:
+                        it['scope'] = legacy_scope[sc]
+                        migrated += 1
+                if migrated:
+                    self._log(f"[调整值] 旧版用途名称已迁移: {migrated} 项")
             items = normalize_adjustments(items)
             # 兼容旧版配置：个体工商户"个人增 + 单位减"两条合并为标准项
             merged = merge_standard_pairs(items)
             if len(merged) < len(items):
                 self._log(f"[调整值] 已合并个体工商户成对项目: "
                           f"{len(items)} → {len(merged)} 项")
-            # 兼容旧版久悬户口径：旧配置把久悬户放在"存款归属核对/扣减"，
-            # 含义是"从 IRP001 扣减"；新口径改为"存款归属核对/增加"，
-            # 直接加到存款归属表对应项（金额不变，方向由扣减改为增加）。
+            # 兼容旧版久悬户口径：旧配置把久悬户放在"存款归属表/扣减"，
+            # 含义是"从 IRP001 扣减"；新口径改为"存款归属表/增加"，
+            # 直接加到会计科目表对应项（金额不变，方向由扣减改为增加）。
             converted = 0
             for it in merged:
                 name = str(it.get('name') or '')
@@ -1191,7 +1215,7 @@ class MainWindow(QMainWindow):
                         converted += 1
             if converted:
                 self._log(f"[调整值] 旧版久悬户调整项已按新口径转换: "
-                          f"{converted} 项（A1411、2411合计表→久悬户轧差值，"
+                          f"{converted} 项（存款归属表→久悬户轧差值，"
                           f"方向改为增加，金额请核对）")
             if any(it.get('scope') == ADJ_SCOPE_ACCT and '久悬' in
                    str(it.get('name') or '') and '轧差' not in
@@ -1215,7 +1239,8 @@ class MainWindow(QMainWindow):
         try:
             items = self._get_adjustments()
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump({'items': items}, f, ensure_ascii=False, indent=2)
+                json.dump({'version': 2, 'items': items}, f,
+                          ensure_ascii=False, indent=2)
         except Exception as e:
             self._log(f"[调整值] 配置保存失败: {e}")
 
@@ -1236,9 +1261,9 @@ class MainWindow(QMainWindow):
 
         返回:
             dict:
-              acct: 存款归属表（科目余额口径）中久悬科目行金额合计
+              acct: 会计科目表（科目余额口径）中久悬科目行金额合计
                     （支出类取负号；模板 H 合计公式已自动计入的部分）
-              dep : A1411、2411合计表（万元口径）公式中已加回的久悬科目部分
+              dep : 存款归属表（万元口径）公式中已加回的久悬科目部分
                     （模板 E 列公式引用了上述久悬科目金额行时等于 acct，否则 0）
 
         说明：这两部分都直接从模板+科目余额表取数计算，用于"从附件5读取"时
@@ -1275,7 +1300,7 @@ class MainWindow(QMainWindow):
                 val = ck.lookup_acct(code_s)
                 jiuxuan[r] = -val if '支出' in name else val
             acct_total = max(0.0, sum(jiuxuan.values()))
-            # 检查 A1411、2411合计表（存款归属金额列）公式是否引用了这些久悬行
+            # 检查 存款归属表（存款归属金额列）公式是否引用了这些久悬行
             dep_included = False
             dep_col = layout['dep_amount']
             ref_re = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+)")
@@ -1295,8 +1320,8 @@ class MainWindow(QMainWindow):
             wb.close()
             dep_total = acct_total if dep_included else 0.0
             if acct_total or dep_total:
-                self._log(f"[调整值] 模板久悬科目行：存款归属表已计入 "
-                          f"{acct_total:,.2f} 元；A1411、2411合计表公式已加回 "
+                self._log(f"[调整值] 模板久悬科目行：会计科目表已计入 "
+                          f"{acct_total:,.2f} 元；存款归属表公式已加回 "
                           f"{dep_total:,.2f} 元")
             return {'acct': acct_total, 'dep': dep_total}
         except Exception as e:
@@ -1309,10 +1334,10 @@ class MainWindow(QMainWindow):
 
         附件5 差额说明列前四格：第7/8行=个人侧净调整额（本金/利息），
         第9/10行=个人/单位久悬户调整额。重建规则：
-          · 个体工商户本金/利息 → 存款归属表（对象=个人↔单位，个人增、单位减）
-          · 久悬户轧差值 → A1411、2411合计表：个人/单位存款本金 增加，
+          · 个体工商户本金/利息 → 会计科目表（对象=个人↔单位，个人增、单位减）
+          · 久悬户轧差值 → 存款归属表：个人/单位存款本金 增加，
             金额 = c3/c4 − 模板公式已加回的久悬科目部分（个人侧）
-          · 久悬户轧差值 → 存款归属表：金额 = c3/c4 − 模板久悬科目行
+          · 久悬户轧差值 → 会计科目表：金额 = c3/c4 − 模板久悬科目行
             已自动计入的金额（个人侧；单位侧模板无久悬科目行则不扣减）
 
         参数:
@@ -1353,7 +1378,7 @@ class MainWindow(QMainWindow):
         def add_jiuxuan(target, amount):
             if not amount:
                 return
-            # 个人侧模板已有久悬科目行（存款归属表自动取数、A1411侧公式加回），
+            # 个人侧模板已有久悬科目行（会计科目表自动取数、A1411侧公式加回），
             # 需要补的只是"轧差值"；单位侧模板无久悬行，直接取全额。
             if target == '个人存款':
                 acct_amount = max(0.0, amount - in_acct)
@@ -1376,8 +1401,8 @@ class MainWindow(QMainWindow):
         self._log(f"[调整值] 已从附件5重建标准调整项: "
                   f"{os.path.basename(att5_paths[0])}  "
                   f"个体工商户本金={c1:,.2f} 利息={c2:,.2f}  "
-                  f"久悬户调整: 个人={c3:,.2f}（模板已自动计入：存款归属表 "
-                  f"{in_acct:,.2f} / A1411、2411合计表 {in_dep:,.2f}）"
+                  f"久悬户调整: 个人={c3:,.2f}（模板已自动计入：会计科目表 "
+                  f"{in_acct:,.2f} / 存款归属表 {in_dep:,.2f}）"
                   f"单位={c4:,.2f}")
         return True
 
@@ -1503,8 +1528,8 @@ class MainWindow(QMainWindow):
         执行操作1：生成保费基数核对表。
 
         数据来源：
-          - A1411、2411合计表 ← A1411 / A2411 月报表（万元）
-          - 存款归属表 ← 科目余额表（元）
+          - 存款归属表 ← A1411 / A2411 月报表（万元）
+          - 会计科目表 ← 科目余额表（元）
           - 被保险存款申报表（IRP001）← IRP001 申报表（元）
         各数据块所在列按模板表头自动识别（旧版/新版附5模板均支持），
         再按模板公式对子项数据计算合并，并写入校验页差额。
@@ -1563,7 +1588,7 @@ class MainWindow(QMainWindow):
         self.btn_base.setEnabled(False)
         self.prog_bar.setVisible(True)
         self.log_view.clear()
-        self._log(">>> 开始生成保费基数核对表（A1411、2411合计表 + 存款归属表）")
+        self._log(">>> 开始生成保费基数核对表（存款归属表 + 会计科目表）")
         self._log(f"A1411: {a1411}")
         self._log(f"A2411: {a2411}")
         self._log(f"科目余额表: {bal}")
@@ -1612,7 +1637,7 @@ class MainWindow(QMainWindow):
         一次性顺序执行两项校验：
           1. IRP002 内部校验 + 与 IRP001 交叉校验
           2. 保费基数核对表 vs IRP001 校验
-             （A1411、2411合计表 F列 + 存款归属表 I/L/M列）
+             （存款归属表 F列 + 会计科目表 I/L/M列）
         """
         folder = self._get_folder()
 
@@ -1623,8 +1648,8 @@ class MainWindow(QMainWindow):
         self.prog_bar.setVisible(True)
         self.log_view.clear()
         self._log(">>> 开始执行数据校验")
-        self._log(f"调整项: {len(adjustments)} 项（存款归属表类已含在核对表内，"
-                  f"A1411、2411合计表类已直接加到该表对应项本金）")
+        self._log(f"调整项: {len(adjustments)} 项（会计科目表类已含在核对表内，"
+                  f"存款归属表类已直接加到该表对应项本金）")
         self._log_sep()
 
         irp001_path = self._get_path('irp001')
