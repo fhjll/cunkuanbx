@@ -610,6 +610,144 @@ def _eval_formula(formula, values):
 
 
 # ============================================================
+# 科目余额表格式识别（自适应不同报表布局）
+# ============================================================
+# 识别思路：
+#   1. 在前若干行/列中找"科目代码"（兼容 科目代号/科目编码/科目编号/科目 等写法）；
+#      找到后，以该单元格所在行作为表头行、所在列作为科目代码列。
+#   2. 在该表头行及下方最多两行内，按表头文字找"期末借方/期末贷方"列；
+#      找不到"期末"时，取最靠右的一对"借方/贷方"列（通常是期末余额组）。
+#   3. 数据从表头最后一行之下开始，逐行读取科目代码及借/贷余额。
+#   4. 以上识别失败时，退回旧版固定列位（A/第1列代码、G/H 列期末借贷、
+#      第4行起为数据）。
+_ACCT_CODE_HEADERS = ('科目代码', '科目代号', '科目编码', '科目编号', '科目号')
+_ACCT_SCAN_MAX_ROW = 30      # 表头最多向下扫描 30 行
+_ACCT_SCAN_MAX_COL = 80      # 表头最多向右扫描 80 列
+
+
+def _header_text(value):
+    """表头单元格文字归一化（去空格/全角空格/换行），便于关键词匹配。"""
+    text = _text(value)
+    for ch in (' ', '\u3000', '\n', '\r', '\t'):
+        text = text.replace(ch, '')
+    return text
+
+
+def _sheet_cell(ws, r, c):
+    """安全读取工作表单元格（越界返回空字符串）。"""
+    try:
+        return ws.cell_value(r, c)
+    except Exception:
+        return ''
+
+
+def _find_acct_code_header(ws):
+    """
+    查找"科目代码"表头单元格。
+
+    返回:
+        tuple or None: (表头行, 科目代码列)，均 0-indexed；未找到返回 None
+    """
+    fallback = None
+    for r in range(min(ws.nrows, _ACCT_SCAN_MAX_ROW)):
+        for c in range(_ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if not text:
+                continue
+            # 明确写法：科目代码 / 科目代号 / 科目编码 / 科目编号 / 科目号
+            if text in _ACCT_CODE_HEADERS:
+                return r, c
+            if '科目' in text and any(k in text for k in
+                                       ('代码', '代号', '编码', '编号')):
+                return r, c
+            # 兜底：只有"科目"两字（老报表常见）
+            if text in ('科目', '会计科目') and fallback is None:
+                fallback = (r, c)
+    return fallback
+
+
+def _find_acct_balance_cols(ws, header_row, code_col):
+    """
+    在表头行附近查找期末借/贷余额列。
+
+    参数:
+        ws: 工作表（xlrd Sheet 或 _XlSheet，0-indexed）
+        header_row (int): 科目代码表头所在行
+        code_col (int): 科目代码所在列
+
+    返回:
+        tuple or None: ((借方表头行, 借方列), (贷方表头行, 贷方列))
+    """
+    scan_rows = range(header_row, min(ws.nrows, header_row + 3))
+    best_debit = best_credit = None
+    single_balance = None
+    any_balance = None
+    for r in scan_rows:
+        for c in range(code_col + 1, _ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if not text:
+                continue
+            if '期末' in text and '借' in text:
+                best_debit = (r, c)
+            elif '期末' in text and '贷' in text:
+                best_credit = (r, c)
+            elif '期末余额' in text and single_balance is None:
+                single_balance = (r, c)
+            elif '余额' in text and '期初' not in text and any_balance is None:
+                any_balance = (r, c)
+    if best_debit and best_credit:
+        return best_debit, best_credit
+    # 退回：取最靠右的一对"借方/贷方"表头（通常为期末余额组）
+    debit = credit = None
+    for r in scan_rows:
+        for c in range(code_col + 1, _ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if not text:
+                continue
+            if '借方' in text or (text.startswith('借') and '余额' in text):
+                debit = (r, c)
+            elif '贷方' in text or (text.startswith('贷') and '余额' in text):
+                credit = (r, c)
+    if debit and credit:
+        return debit, credit
+    # 只有一列"期末余额"（或只有一列余额）
+    if single_balance:
+        return single_balance, single_balance
+    if any_balance:
+        return any_balance, any_balance
+    return None
+
+
+def _detect_account_layout(ws):
+    """
+    识别科目余额表布局。
+
+    返回:
+        dict or None: {header_row, code_col, debit_col, credit_col, data_start}
+                      （均 0-indexed）；识别失败返回 None（调用方用旧版固定列位）
+    """
+    header = _find_acct_code_header(ws)
+    if header is None:
+        return None
+    header_row, code_col = header
+    balance = _find_acct_balance_cols(ws, header_row, code_col)
+    if balance:
+        (dr, debit_col), (cr, credit_col) = balance
+        data_start = max(dr, cr) + 1
+    else:
+        # 识别到科目代码列、但没识别到余额表头：按旧版相对位置兜底
+        debit_col, credit_col = code_col + 6, code_col + 7
+        data_start = header_row + 1
+    return {
+        'header_row': header_row,
+        'code_col': code_col,
+        'debit_col': debit_col,
+        'credit_col': credit_col,
+        'data_start': data_start,
+    }
+
+
+# ============================================================
 # 保费基数核对表生成器
 # ============================================================
 
@@ -679,29 +817,52 @@ class BaseChecker:
 
     def load_account_balance(self, filepath):
         """
-        加载科目余额表（源数据）。
+        加载科目余额表（源数据，自适应不同报表格式）。
 
-        支持多 sheet；数据从第4行开始，A列 = 科目代码，
-        G列 = 期末借方余额，H列 = 期末贷方余额（取非零的一方）。
+        识别规则：
+          1. 先找"科目代码"（兼容 科目代号/科目编码/科目编号/科目号/科目）
+             所在单元格：以它所在行为表头行、所在列为科目代码列；
+          2. 在表头行及下方最多两行内按表头文字找"期末借方/期末贷方"列；
+             找不到"期末"时，取最靠右的一对"借方/贷方"列；
+          3. 数据从表头最后一行之下逐行读取；
+          4. 识别失败时退回旧版固定列位（A 列代码、G/H 列期末借贷、第4行起）。
+
+        多 sheet 时逐 sheet 识别；同一科目以最先读到的值为准。
 
         参数:
             filepath (str): 科目余额表路径（如 科目余额查询报表.xls）
         """
         xls = _ExcelSheets(str(filepath))
         self.acct_data.clear()
-        for sname in xls.sheet_names():
+        sheets = xls.sheet_names()
+        detected = []
+        for sname in sheets:
             ws = xls.sheet_by_name(sname)
-            for r in range(3, ws.nrows):
-                code = str(ws.cell_value(r, 0)).strip()
-                if not code:
+            layout = _detect_account_layout(ws)
+            if layout is None:
+                layout = {'header_row': 3, 'code_col': 0,
+                          'debit_col': 6, 'credit_col': 7, 'data_start': 3}
+            else:
+                detected.append((sname, layout))
+            code_col = layout['code_col']
+            debit_col = layout['debit_col']
+            credit_col = layout['credit_col']
+            for r in range(layout['data_start'], ws.nrows):
+                code = _clean_code(_sheet_cell(ws, r, code_col))
+                if not code or code in ('科目', '会计科目'):
                     continue
-                debit = to_float(ws.cell_value(r, 6))
-                credit = to_float(ws.cell_value(r, 7))
+                debit = to_float(_sheet_cell(ws, r, debit_col))
+                credit = to_float(_sheet_cell(ws, r, credit_col))
                 if code not in self.acct_data:
                     self.acct_data[code] = debit if debit != 0 else credit
+        for sname, ly in detected:
+            self.messages.append(
+                f"  科目余额表[{sname}]: 表头第{ly['header_row'] + 1}行，"
+                f"科目代码第{ly['code_col'] + 1}列，"
+                f"期末借/贷列={ly['debit_col'] + 1}/{ly['credit_col'] + 1}")
         self.messages.append(
             f"科目余额表: {len(self.acct_data)} 个科目, "
-            f"{len(xls.sheet_names())} 个 sheet")
+            f"{len(sheets)} 个 sheet")
 
     def load_irp001(self, filepath):
         """
