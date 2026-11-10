@@ -578,6 +578,14 @@ BankManager 主要方法：
 6.1 输入文件
 ────────────
 
+格式识别说明：
+  - 所有输入文件按"文件真实内容"识别格式，而不是只看扩展名；
+  - 支持 OOXML(.xlsx)、BIFF(.xls)，以及系统导出的网页/邮件格式
+    （MHTML、HTML 表格、Excel 2003 XML/SpreadsheetML）——这类文件即使
+    扩展名是 .xls，也可直接读取；
+  - 真正的损坏文件会抛出带文件名的提示，建议用 Excel/WPS 另存为
+    .xls/.xlsx 后重试。
+
 A1411 / A2411 月报表 (.xls/.xlsx)
   - 数据从第4行开始（0-indexed row 3）
   - A列 = 指标编号（12Mxx / 22Mxx），C列 = 期末余额（万元）

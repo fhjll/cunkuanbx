@@ -49,7 +49,8 @@ import xlrd
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.cell.cell import MergedCell
-from common import to_float, _is_xlsx_format
+from common import (to_float, _is_xlsx_format, detect_excel_kind,
+                    _load_pseudo_excel_sheets, _pseudo_excel_error)
 
 
 # ============================================================
@@ -133,17 +134,15 @@ def _safe_set_value(ws, row, col, val, number_format=None, font=None,
 
 class _ExcelSheets:
     """
-    统一的 .xls / .xlsx 读取器，支持多 sheet。
+    统一的 .xls / .xlsx / 网页格式读取器，支持多 sheet。
 
-    提供与 xlrd 兼容的接口（sheet_names, sheet_by_name），
-    自动根据文件格式选择底层引擎。
-
-    与 common.ExcelSheet 的区别：
-      - common.ExcelSheet 只读取第一个活动 sheet
-      - _ExcelSheets 读取所有 sheet（因为科目余额表可能有多个 sheet）
+    提供与 xlrd 兼容的接口（sheet_names, sheet_by_name），按文件内容识别
+    真实格式：OOXML → openpyxl；旧式 xls → xlrd；MHTML/HTML/SpreadsheetML
+    （系统导出的"伪 Excel"）→ 网页表格解析器。
 
     特殊处理：
       - 文件扩展名为 .xls 但内部为 OOXML 时，自动转换为临时 .xlsx 读取
+      - 网页格式（MIME-Version/HTML/XML 表格）自动解析为表格
     """
 
     def __init__(self, filepath):
@@ -152,32 +151,63 @@ class _ExcelSheets:
 
         参数:
             filepath (str): Excel 文件路径
+
+        异常:
+            ValueError: 文件无法按任何已知格式读取（错误信息含文件名与建议）
         """
         filepath = str(filepath)
-        ext = filepath.lower()
-        temp_copy = None
+        self._temp_copy = None
+        self._pseudo_sheets = None
+        self._kind = detect_excel_kind(filepath)
 
-        # 后缀为 .xls 但内部是 OOXML → 复制为临时 .xlsx
-        if not ext.endswith((".xlsx", ".xlsm")) and _is_xlsx_format(filepath):
-            fd, temp_copy = tempfile.mkstemp(suffix=".xlsx")
-            os.close(fd)
-            shutil.copy2(filepath, temp_copy)
-            filepath = temp_copy
-            ext = ".xlsx"
+        if self._kind in ('mhtml', 'html', 'spreadsheetml'):
+            try:
+                sheets = _load_pseudo_excel_sheets(filepath, self._kind)
+            except Exception as e:
+                raise _pseudo_excel_error(filepath, str(e)) from e
+            if not sheets:
+                raise _pseudo_excel_error(filepath, '未能从网页/XML 内容中解析出表格')
+            self._pseudo_sheets = sheets
+            self._sheet_names = [s.name for s in sheets]
+            self._is_xlsx = False
+            return
 
         try:
-            if ext.endswith((".xlsx", ".xlsm")):
-                self._wb = openpyxl.load_workbook(filepath, data_only=True)
+            if self._kind in ('xlsx', 'zip'):
+                load_path = filepath
+                if not filepath.lower().endswith((".xlsx", ".xlsm")):
+                    fd, temp_copy = tempfile.mkstemp(suffix=".xlsx")
+                    os.close(fd)
+                    shutil.copy2(filepath, temp_copy)
+                    self._temp_copy = temp_copy
+                    load_path = temp_copy
+                try:
+                    self._wb = openpyxl.load_workbook(load_path, data_only=True)
+                except Exception as e:
+                    raise _pseudo_excel_error(filepath, str(e)) from e
                 self._sheet_names = self._wb.sheetnames
                 self._is_xlsx = True
             else:
-                self._wb_xlrd = xlrd.open_workbook(filepath)
+                try:
+                    self._wb_xlrd = xlrd.open_workbook(filepath)
+                except Exception as e:
+                    if _is_xlsx_format(filepath):
+                        fd, temp_copy = tempfile.mkstemp(suffix=".xlsx")
+                        os.close(fd)
+                        shutil.copy2(filepath, temp_copy)
+                        self._temp_copy = temp_copy
+                        wb2 = openpyxl.load_workbook(temp_copy, data_only=True)
+                        self._wb = wb2
+                        self._sheet_names = wb2.sheetnames
+                        self._is_xlsx = True
+                        return
+                    raise _pseudo_excel_error(filepath, str(e)) from e
                 self._sheet_names = self._wb_xlrd.sheet_names()
                 self._is_xlsx = False
         finally:
-            if temp_copy:
+            if self._temp_copy:
                 try:
-                    os.remove(temp_copy)
+                    os.remove(self._temp_copy)
                 except Exception:
                     pass
 
@@ -193,11 +223,24 @@ class _ExcelSheets:
             name (str): 工作表名称
 
         返回:
-            _XlSheet 或 xlrd Sheet 对象
+            工作表对象（xlrd Sheet / _XlSheet / _HtmlSheet）
         """
+        if self._pseudo_sheets is not None:
+            for sheet in self._pseudo_sheets:
+                if sheet.name == name:
+                    return sheet
+            return self._pseudo_sheets[0]
         if self._is_xlsx:
             return _XlSheet(self._wb[name])
         return self._wb_xlrd.sheet_by_name(name)
+
+    def sheet_by_index(self, index=0):
+        """按序号获取工作表（0-indexed）"""
+        if self._pseudo_sheets is not None:
+            return self._pseudo_sheets[index]
+        if self._is_xlsx:
+            return _XlSheet(self._wb.worksheets[index])
+        return self._wb_xlrd.sheet_by_index(index)
 
 
 class _XlSheet:
@@ -216,6 +259,11 @@ class _XlSheet:
     def nrows(self):
         """返回总行数（0-indexed）"""
         return self._ws.max_row
+
+    @property
+    def ncols(self):
+        """返回总列数（0-indexed）"""
+        return self._ws.max_column
 
     def cell_value(self, r, c):
         """
