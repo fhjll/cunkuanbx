@@ -146,32 +146,17 @@ def _eval_excel_formula(formula, values):
 
 def _read_attachment_total(filepath):
     """
-    读取附件（附件2/附件3）的本金合计数。
-
-    附件2/3的格式约定：
-      - 表头在第3行之后
-      - 最后一行为"合计"行（可能存在多个"合计"行，取最后一个）
-      - 金额在第6列（0-indexed 列索引 = 5）
+    读取附件（附件2/附件3）的本金合计数（自适应表头/列位/合计行）。
 
     参数:
-        filepath (str): 附件文件路径（支持 .xls 和 .xlsx）
+        filepath (str): 附件文件路径（支持 .xls/.xlsx 及网页格式伪 Excel）
 
     返回:
         float: 本金合计数（单位：元）
-
-    注意：
-      返回的单位是元，调用方需要自行转换为万元（除以 10000）
     """
-    ws = ExcelSheet(str(filepath))
-    # 从后往前寻找最后一个"合计"行（总合计）
-    for r in range(ws.nrows - 1, -1, -1):
-        cell0 = str(ws.cell_value(r, 0)).strip()
-        if cell0 in ('合计', '合\xa0计'):
-            return to_float(ws.cell_value(r, 5))
-    # 若没找到合计行，取倒数第二行作为兜底
-    if ws.nrows > 3:
-        return to_float(ws.cell_value(ws.nrows - 2, 5))
-    return 0.0
+    # 复用 account_checker 的自适应附件解析，避免两套硬编码列位
+    from account_checker import _read_attachment_summary
+    return _read_attachment_summary(filepath)[0]
 
 
 # ============================================================

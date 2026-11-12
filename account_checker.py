@@ -284,57 +284,112 @@ class _XlSheet:
 # 附件读取
 # ============================================================
 
+# ============================================================
+# 附件2/3/4 布局识别（按表头文字）
+# ============================================================
+
+def _attachment_header_text(value):
+    """附件表头文字归一化（去空格/全角空格/换行）。"""
+    text = str(value).strip() if value is not None else ''
+    for ch in (' ', '\u3000', '\xa0', '\n', '\r', '\t'):
+        text = text.replace(ch, '')
+    return text
+
+
+def _attachment_sheet_cells(ws, r):
+    """安全读取某行前 30 列文字列表。"""
+    out = []
+    for c in range(30):
+        try:
+            out.append(_attachment_header_text(ws.cell_value(r, c)))
+        except Exception:
+            out.append('')
+    return out
+
+
+def _detect_attachment_layout(ws):
+    """
+    识别附件2/3/4的表头行及"当前余额/应付利息"数据列。
+
+    返回:
+        dict or None: {header_row, principal_col, interest_col, data_start}
+    """
+    for r in range(min(ws.nrows, 15)):
+        texts = _attachment_sheet_cells(ws, r)
+        principal_col = interest_col = None
+        for c, text in enumerate(texts):
+            if not text:
+                continue
+            if ('当前余额' in text or '本金' in text
+                    or ('余额' in text and '利息' not in text)) \
+                    and principal_col is None:
+                principal_col = c
+            if ('应付利息' in text or '利息' in text) and interest_col is None:
+                interest_col = c
+        if principal_col is not None and interest_col is not None:
+            return {
+                'header_row': r,
+                'principal_col': principal_col,
+                'interest_col': interest_col,
+                'data_start': r + 1,
+            }
+    return None
+
+
+def _find_attachment_total_row(ws):
+    """从下往上找"合计"行（前3列任一格含"合计"）。"""
+    for r in range(ws.nrows - 1, -1, -1):
+        texts = _attachment_sheet_cells(ws, r)[:4]
+        if any('合计' in t for t in texts if t):
+            return r
+    return None
+
+
 def _read_attachment_summary(filepath):
     """
     读取附件文件，返回（本金合计, 利息合计）。
 
-    不同附件格式略有不同：
-      - 附件2（住房公积金明细表）：合计行在第6列（本金）和第7列（利息）
-      - 附件3（社保基金存款明细表）：同附件2
-      - 附件4（高管人员存款统计表）：合计行在第7列（本金）和第8列（利息）
-
-    查找策略：
-      1. 从最后一行向前查找"合计"行
-      2. 若没找到，取倒数第2行作为兜底
+    附件2/3/4 的列位、表头行、"合计"行位置都按表头文字自适应识别：
+      · 表头行：同时含"当前余额/本金"与"应付利息/利息"的行；
+      · 数据列：上述两个表头所在列；
+      · 合计行：从下往上找含"合计"的行（前几列任一处）。
+    识别失败时回退旧版约定：附件2/3 为第6/7列，附件4 为第7/8列。
 
     参数:
         filepath (str): 附件文件路径
 
     返回:
-        tuple: (principal, interest) — 本金合计和利息合计（单位：元）
+        tuple: (principal, interest) — 本金合计和应付利息合计（单位：元）
     """
     xls = _ExcelSheets(str(filepath))
     ws = xls.sheet_by_name(xls.sheet_names()[0])
-    name_lower = str(filepath).lower()
-
-    # 高管存款（附件4）列位置不同
-    if "高管" in name_lower or "高级" in name_lower:
-        last_row = ws.nrows - 1
-        return to_float(ws.cell_value(last_row, 6)), to_float(ws.cell_value(last_row, 7))
-
-    # 附件2/3：从后向前找"合计"行
-    principal = 0.0
-    interest = 0.0
-    found = False
-    for r in range(ws.nrows - 1, -1, -1):
-        cell0 = str(ws.cell_value(r, 0)).strip()
-        if cell0 in ('合计', '合\xa0计'):
-            vp = to_float(ws.cell_value(r, 5))   # 第6列 = 本金
-            vi = to_float(ws.cell_value(r, 6))   # 第7列 = 利息
-            if vp != 0.0 or vi != 0.0:
-                principal, interest, found = vp, vi, True
-                break
-            elif not found:
-                principal, interest, found = vp, vi, True
-
-    # 没找到合计行，取倒数第2行
-    if principal == 0.0 and interest == 0.0 and ws.nrows > 3:
-        for r in range(ws.nrows - 2, -1, -1):
-            vp = to_float(ws.cell_value(r, 5))
-            vi = to_float(ws.cell_value(r, 6))
-            if vp != 0.0 or vi != 0.0:
-                principal, interest = vp, vi
-                break
+    layout = _detect_attachment_layout(ws)
+    if layout is not None:
+        principal_col = layout['principal_col']
+        interest_col = layout['interest_col']
+        data_start = layout['data_start']
+    else:
+        name_lower = str(filepath).lower()
+        if '高管' in name_lower or '高级' in name_lower:
+            principal_col, interest_col = 6, 7
+        else:
+            principal_col, interest_col = 5, 6
+        data_start = 0
+    total_row = _find_attachment_total_row(ws)
+    principal = interest = 0.0
+    if total_row is not None:
+        principal = to_float(ws.cell_value(total_row, principal_col))
+        interest = to_float(ws.cell_value(total_row, interest_col))
+    if principal == 0.0 and interest == 0.0:
+        # 合计行未填数时，累加明细行（跳过"例："、"…"、说明行）
+        for r in range(max(data_start, 0), total_row if total_row is not None else ws.nrows):
+            texts = _attachment_sheet_cells(ws, r)
+            first = next((t for t in texts if t), '')
+            if not first or '例' in first or first == '…' or '说明' in first \
+                    or '新增' in first:
+                continue
+            principal += to_float(ws.cell_value(r, principal_col))
+            interest += to_float(ws.cell_value(r, interest_col))
     return principal, interest
 
 

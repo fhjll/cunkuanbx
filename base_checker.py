@@ -748,6 +748,169 @@ def _detect_account_layout(ws):
 
 
 # ============================================================
+# A1411/A2411 月报表、IRP001 申报表布局识别
+# ============================================================
+
+def _detect_month_report_layout(ws):
+    """
+    识别 A1411/A2411 月报表布局（按表头文字，不依赖固定行列）。
+
+    识别内容：
+      · 表头行：含"指标编号/指标代码/子项代码/科目代码"的行；
+      · 代码列：表头所在列；
+      · 名称列：含"指标名称/子项名称/科目名称/项目名称"的列；
+      · 余额列：表头含"余额/金额"的列，优先"人民币/外币/期末/本期"，
+        跳过"上期/期初/年初/上月"（这些是上期数）。
+
+    返回:
+        dict or None: {header_row, code_col, name_col, amount_col, data_start}
+    """
+    header = None
+    for r in range(min(ws.nrows, 20)):
+        for c in range(_ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if not text:
+                continue
+            if (text in ('指标编号', '指标代码', '指标编码', '子项代码',
+                         '科目代码', '项目代码', '科目代号')
+                    or ('代码' in text and ('指标' in text or '子项' in text
+                                           or '科目' in text))):
+                header = (r, c)
+                break
+        if header:
+            break
+    if header is None:
+        return None
+    header_row, code_col = header
+
+    name_col = None
+    for r in (header_row, header_row + 1):
+        for c in range(_ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if text in ('指标名称', '子项名称', '科目名称', '项目名称'):
+                name_col = c
+                break
+        if name_col is not None:
+            break
+
+    amount_col = None
+    fallback_col = None
+    for r in (header_row, header_row + 1):
+        for c in range(code_col + 1, _ACCT_SCAN_MAX_COL):
+            text = _header_text(_sheet_cell(ws, r, c))
+            if not text:
+                continue
+            if '余额' not in text and '金额' not in text:
+                continue
+            if any(k in text for k in ('上期', '期初', '年初', '上月', '上年')):
+                if fallback_col is None:
+                    fallback_col = c
+                continue
+            amount_col = c
+            break
+        if amount_col is not None:
+            break
+    if amount_col is None:
+        amount_col = fallback_col
+    if amount_col is None:
+        amount_col = code_col + 2
+    return {
+        'header_row': header_row,
+        'code_col': code_col,
+        'name_col': name_col,
+        'amount_col': amount_col,
+        'data_start': header_row + 1,
+    }
+
+
+def _detect_irp001_layout(ws):
+    """
+    识别 IRP001 被保险存款申报表布局（表头行/标签列/本金列/利息列/合计列）。
+
+    返回:
+        dict or None: {header_row, label_col, principal_col, interest_col,
+                       total_col, data_start}
+    """
+    header_row = None
+    for r in range(min(ws.nrows, 20)):
+        texts = [_header_text(_sheet_cell(ws, r, c))
+                 for c in range(_ACCT_SCAN_MAX_COL)]
+        if any('本金' in t for t in texts) and any('利息' in t for t in texts):
+            header_row = r
+            break
+    if header_row is None:
+        return None
+
+    label_col = principal_col = interest_col = total_col = None
+    for c in range(_ACCT_SCAN_MAX_COL):
+        text = _header_text(_sheet_cell(ws, header_row, c))
+        if not text:
+            continue
+        if ('存款项目' in text or text in ('项目', '项目名称')) and label_col is None:
+            label_col = c
+        if '本金' in text and principal_col is None:
+            principal_col = c
+        if ('应付利息' in text or '利息' in text) and interest_col is None:
+            interest_col = c
+        if '合计' in text and total_col is None:
+            total_col = c
+    if principal_col is None or interest_col is None:
+        return None
+    if label_col is None:
+        label_col = max(0, principal_col - 2)
+    return {
+        'header_row': header_row,
+        'label_col': label_col,
+        'principal_col': principal_col,
+        'interest_col': interest_col,
+        'total_col': total_col,
+        'data_start': header_row + 1,
+    }
+
+
+def _find_irp_label_row(ws, layout, section, item):
+    """
+    在 IRP001/IRP002 中按「章节 + 项目」定位行号（标签列自适应）。
+
+    参数:
+        ws: 工作表（0-indexed）
+        layout (dict): _detect_irp001_layout() 结果（含 label_col/data_start）
+        section (str or None): 章节关键词（如"一、境内存款"）
+        item (str): 项目关键词
+
+    返回:
+        int or None: 行号（0-indexed）
+    """
+    label_col = layout.get('label_col', 1)
+    start = layout.get('data_start', 0)
+    if section:
+        found = None
+        for r in range(start, ws.nrows):
+            if section in _header_text(_sheet_cell(ws, r, label_col)):
+                found = r + 1
+                break
+        if found is None:
+            # 章节标签可能不在主标签列：在前几列中再找一次
+            for r in range(start, ws.nrows):
+                for c in range(0, 4):
+                    if section in _header_text(_sheet_cell(ws, r, c)):
+                        found = r + 1
+                        break
+                if found is not None:
+                    break
+        if found is not None:
+            start = found
+    for r in range(start, ws.nrows):
+        if item in _header_text(_sheet_cell(ws, r, label_col)):
+            return r
+    for r in range(start, ws.nrows):
+        for c in range(0, 4):
+            if item in _header_text(_sheet_cell(ws, r, c)):
+                return r
+    return None
+
+
+# ============================================================
 # 保费基数核对表生成器
 # ============================================================
 
@@ -786,33 +949,57 @@ class BaseChecker:
     # 数据加载
     # ----------------------------------------------------------
 
-    def _load_monthly_report(self, filepath, target, not_found):
+    def _load_monthly_report(self, filepath, target, not_found, label=''):
         """
-        加载 A1411 / A2411 月报表。
+        加载 A1411 / A2411 月报表（表头/代码列/余额列自适应）。
 
-        读取规则：数据从第4行开始，A列 = 指标编号，C列 = 期末余额（万元）。
+        识别规则：
+          1. 找含"指标编号/指标代码/子项代码/科目代码"的表头行；
+          2. 以表头所在列为代码列，右侧含"余额/金额"的列为余额列
+             （优先人民币/外币/期末/本期，跳过上期/期初等）；
+          3. 从表头下一行开始逐行读取代码与余额。
+
+        识别失败时回退旧版固定列位（A列代码、C列余额、第4行起）。
 
         参数:
             filepath (str): 月报表路径
             target (dict): 目标字典
             not_found (list): 未匹配代码记录列表
+            label (str): 日志用表名（A1411/A2411）
         """
         ws = ExcelSheet(str(filepath))
+        layout = _detect_month_report_layout(ws)
+        if layout is None:
+            layout = {'header_row': 3, 'code_col': 0, 'name_col': 1,
+                      'amount_col': 2, 'data_start': 3}
+            self.messages.append(
+                f"  {label}未识别到表头，按旧版 A列代码/C列余额 读取")
+        else:
+            self.messages.append(
+                f"  {label}布局: 表头第{layout['header_row'] + 1}行，"
+                f"代码第{layout['code_col'] + 1}列，"
+                f"余额第{layout['amount_col'] + 1}列")
         target.clear()
         del not_found[:]
-        for r in range(3, ws.nrows):
-            code = str(ws.cell_value(r, 0) or '').strip()
-            if code:
-                target[code] = to_float(ws.cell_value(r, 2))
+        code_col = layout['code_col']
+        amount_col = layout['amount_col']
+        for r in range(layout['data_start'], ws.nrows):
+            code = _clean_code(_sheet_cell(ws, r, code_col))
+            if not code or code in ('指标编号', '指标代码', '子项代码',
+                                    '科目代码', '项目代码', '科目代号'):
+                continue
+            target[code] = to_float(_sheet_cell(ws, r, amount_col))
 
     def load_a1411(self, filepath):
         """加载 A1411 月报表（人民币，万元）"""
-        self._load_monthly_report(filepath, self.a1411_data, self.not_found_a1411)
+        self._load_monthly_report(filepath, self.a1411_data,
+                                  self.not_found_a1411, 'A1411')
         self.messages.append(f"A1411: {len(self.a1411_data)} 个指标")
 
     def load_a2411(self, filepath):
         """加载 A2411 月报表（外币，万元）"""
-        self._load_monthly_report(filepath, self.a2411_data, self.not_found_a2411)
+        self._load_monthly_report(filepath, self.a2411_data,
+                                  self.not_found_a2411, 'A2411')
         self.messages.append(f"A2411: {len(self.a2411_data)} 个指标")
 
     def load_account_balance(self, filepath):
@@ -866,10 +1053,10 @@ class BaseChecker:
 
     def load_irp001(self, filepath):
         """
-        加载 IRP001 被保险存款申报表的本金/应付利息。
+        加载 IRP001 被保险存款申报表的本金/应付利息（列位自适应）。
 
-        B 列为行标签（"一、境内存款"、"（一）个人存款"等），
-        C 列 = 本金，D 列 = 应付利息。
+        自动识别表头行、标签列、"本金/应付利息"列；标签列默认按表头
+        "存款项目"识别，识别不到时回退到第2列（B列）。
 
         参数:
             filepath (str): IRP001 申报表路径
@@ -877,28 +1064,29 @@ class BaseChecker:
         ws = ExcelSheet(str(filepath))
         self.irp001_p.clear()
         self.irp001_i.clear()
+        layout = _detect_irp001_layout(ws)
+        if layout is None:
+            layout = {'header_row': 11, 'label_col': 1,
+                      'principal_col': 2, 'interest_col': 3,
+                      'total_col': 4, 'data_start': 12}
+            self.messages.append(
+                "  IRP001 未识别到表头，按旧版 B列标签/C列本金/D列利息 读取")
+        else:
+            self.messages.append(
+                f"  IRP001布局: 表头第{layout['header_row'] + 1}行，"
+                f"标签第{layout['label_col'] + 1}列，"
+                f"本金第{layout['principal_col'] + 1}列，"
+                f"利息第{layout['interest_col'] + 1}列")
         for _key, section, item in IRP001_ITEM_KEYS:
-            row = self._find_irp_row(ws, section, item)
+            row = _find_irp_label_row(ws, layout, section, item)
             if row is None:
                 self.messages.append(f"  ⚠ IRP001 中未找到「{item}」行")
                 continue
-            self.irp001_p[(section, item)] = to_float(ws.cell_value(row, 2))
-            self.irp001_i[(section, item)] = to_float(ws.cell_value(row, 3))
+            self.irp001_p[(section, item)] = to_float(
+                _sheet_cell(ws, row, layout['principal_col']))
+            self.irp001_i[(section, item)] = to_float(
+                _sheet_cell(ws, row, layout['interest_col']))
         self.messages.append(f"IRP001: 读取 {len(self.irp001_p)} 个项目")
-
-    @staticmethod
-    def _find_irp_row(ws, section, item):
-        """在 IRP001 中按「章节 + 项目」定位行号（未找到返回 None）"""
-        start = 0
-        if section:
-            for r in range(ws.nrows):
-                if section in str(ws.cell_value(r, 1)):
-                    start = r + 1
-                    break
-        for r in range(start, ws.nrows):
-            if item in str(ws.cell_value(r, 1)):
-                return r
-        return None
 
     def load_attachments(self, attachment2=None, attachment3=None, attachment4=None):
         """

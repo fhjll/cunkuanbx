@@ -56,7 +56,8 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import column_index_from_string
 from common import to_float, excel_round, ExcelSheet as _ExcelSheet
 from base_checker import (ADJ_ROWS, adjustment_row_values,
-                          detect_template_layout, normalize_adjustments)
+                          detect_template_layout, normalize_adjustments,
+                          _detect_irp001_layout, _find_irp_label_row)
 from bank_config import resolve_template
 from account_checker import _resolve_merged
 
@@ -89,24 +90,148 @@ def _get_cell_val(ws, r, c):
 # Excel 行号查找工具函数
 # ============================================================
 
-def _find_irp_row(ws, keyword):
-    """
-    在 _ExcelSheet（0-indexed）中按 B 列关键词查找行号。
+def _safe_cell(ws, r, c):
+    """安全读取单元格（越界返回空字符串，兼容 xlrd 越界抛异常）。"""
+    try:
+        return ws.cell_value(r, c)
+    except Exception:
+        return ''
 
-    IRP 申报表的 B 列存放行标签，如"一、境内存款"、"（一）个人存款"等。
+
+def _irp_text(value):
+    """IRP 表头/标签文字归一化（去空格/全角空格/换行）。"""
+    text = str(value).strip() if value is not None else ''
+    for ch in (' ', '\u3000', '\xa0', '\n', '\r', '\t'):
+        text = text.replace(ch, '')
+    return text
+
+
+def _find_irp_row(ws, keyword, label_col=1):
+    """
+    在 IRP 申报表中按关键词查找行号（标签列可指定）。
+
+    先查指定标签列，找不到时再在前 4 列中兜底查找，
+    兼容不同报表把"项目"放在不同列的情况。
 
     参数:
-        ws: _ExcelSheet 对象
+        ws: 工作表对象（0-indexed）
         keyword (str): 要搜索的关键词
+        label_col (int): 标签列（0-indexed，默认 B 列）
 
     返回:
         int or None: 匹配到的行号（0-indexed），未找到返回 None
     """
+    keyword = _irp_text(keyword)
     for r in range(ws.nrows):
-        b_val = str(ws.cell_value(r, 1)).strip()
-        if keyword in b_val:
+        if keyword in _irp_text(_safe_cell(ws, r, label_col)):
             return r
+    for r in range(ws.nrows):
+        for c in range(0, 4):
+            if c == label_col:
+                continue
+            if keyword in _irp_text(_safe_cell(ws, r, c)):
+                return r
     return None
+
+
+def _detect_irp002_layout(ws):
+    """
+    识别 IRP002 存款账户统计表布局。
+
+    结构：表头分两级——分组行（合计 / ≤最高偿付限额 / >最高偿付限额）
+    + 字段行（户数 / 本金 / 应付利息 / 本息合计），共三组。
+
+    返回:
+        dict or None: {
+          header_row, label_col,
+          groups: {'total': {...}, 'lte': {...}, 'gt': {...}}（各含列号）,
+          max_comp_row, max_comp_col
+        }
+    """
+    header_row = None
+    for r in range(min(ws.nrows, 25)):
+        texts = [_irp_text(_safe_cell(ws, r, c)) for c in range(30)]
+        count_cells = sum(1 for t in texts if '户数' in t)
+        if (count_cells >= 2 and any('本金' in t for t in texts)
+                and any('本息合计' in t for t in texts)):
+            header_row = r
+            break
+    if header_row is None:
+        return None
+    texts = [_irp_text(_safe_cell(ws, header_row, c)) for c in range(30)]
+    starts = [c for c, t in enumerate(texts) if '户数' in t]
+    groups = {}
+    order = []
+    for s in starts:
+        end = next((x for x in starts if x > s), s + 4)
+        group = {}
+        for c in range(s, min(end, len(texts))):
+            t = texts[c]
+            if not t:
+                continue
+            if '户数' in t:
+                group['count'] = c
+            elif '本息合计' in t or t == '合计':
+                group['total'] = c
+            elif '本金' in t:
+                group['principal'] = c
+            elif '利息' in t:
+                group['interest'] = c
+        if len(group) < 4:
+            continue
+        group_label = ''
+        for rr in (header_row - 1, header_row - 2):
+            if rr >= 0:
+                group_label = _irp_text(_safe_cell(ws, rr, s))
+                if group_label:
+                    break
+        if '≤' in group_label or '<=' in group_label or '以内' in group_label:
+            kind = 'lte'
+        elif '>' in group_label or '以上' in group_label or '超过' in group_label:
+            kind = 'gt'
+        else:
+            kind = 'total'
+        groups.setdefault(kind, group)
+        order.append(group)
+    # 三组识别不全时按从左到右顺序兜底补齐
+    if len(groups) < 3 and len(order) >= 3:
+        for kind, group in zip(('total', 'lte', 'gt'), order):
+            groups.setdefault(kind, group)
+    if not {'total', 'lte', 'gt'} <= set(groups):
+        return None
+
+    label_col = None
+    for r in range(0, header_row + 1):
+        for c in range(0, 5):
+            if '项目' in _irp_text(_safe_cell(ws, r, c)):
+                label_col = c
+                break
+        if label_col is not None:
+            break
+    if label_col is None:
+        label_col = max(0, groups['total']['count'] - 1)
+
+    max_comp_row = max_comp_col = None
+    for r in range(ws.nrows):
+        texts_row = [_irp_text(_safe_cell(ws, r, c)) for c in range(6)]
+        hit = next((c for c, t in enumerate(texts_row) if '最高偿付限额' in t),
+                   None)
+        if hit is None:
+            continue
+        for c in range(hit + 1, 10):
+            value = _get_cell_val(ws, r, c)
+            if value:
+                max_comp_row, max_comp_col = r, c
+                break
+        if max_comp_row is not None:
+            break
+    return {
+        'header_row': header_row,
+        'label_col': label_col,
+        'groups': groups,
+        'max_comp_row': max_comp_row,
+        'max_comp_col': max_comp_col,
+    }
 
 
 def _find_irp_cross_rows(ws, section_keyword, item_keyword):
@@ -144,20 +269,16 @@ def _find_irp_cross_rows(ws, section_keyword, item_keyword):
 
 def validate_irp002(filepath, irp001_path=None):
     """
-    IRP002 数据校验。
+    IRP002 数据校验（列位自适应）。
 
     校验内容：
       (1) 户均本息合计校验
-          检查 ≤最高偿付限额 和 >最高偿付限额 两组的户均金额是否合理。
-          ≤ 限额组户均 ≤ 限额；> 限额组户均 > 限额。
-
       (2) 分组合计 vs 总合计校验
-          检查组内各行：≤限额 + >限额 的合计是否等于总合计。
-          允许 ±0.1% 的容差。
-
       (3) IRP002 vs IRP001 交叉校验（当 irp001_path 提供时）
-          按关键词精确匹配 IRP002 和 IRP001 中的对应项目，
-          比较本金和利息数据的一致性。
+
+    列位识别：自动找含"户数/本金/应付利息/本息合计"的字段表头行，
+    并按分组表头（合计 / ≤最高偿付限额 / >最高偿付限额）识别三组列；
+    识别失败时退回旧版固定列位。
 
     参数:
         filepath (str): IRP002 申报表文件路径
@@ -172,10 +293,36 @@ def validate_irp002(filepath, irp001_path=None):
     except Exception as e:
         return [f"ERROR: 无法读取 IRP002: {e}"]
 
-    # --- 动态查找最高偿付限额行 ---
-    max_comp_row = _find_irp_row(ws, '最高偿付限额')
-    if max_comp_row is not None:
-        max_comp = _get_cell_val(ws, max_comp_row, 2)
+    layout = _detect_irp002_layout(ws)
+    if layout is not None:
+        label_col = layout['label_col']
+        groups = layout['groups']
+        max_comp_row = layout['max_comp_row']
+        max_comp_col = layout['max_comp_col']
+        msgs.append(
+            f"IRP002布局: 表头第{layout['header_row'] + 1}行，"
+            f"标签第{label_col + 1}列（列位自适应）")
+    else:
+        label_col = 1
+        groups = {
+            'total': {'count': 2, 'principal': 3, 'interest': 4, 'total': 5},
+            'lte': {'count': 6, 'principal': 7, 'interest': 8, 'total': 9},
+            'gt': {'count': 10, 'principal': 11, 'interest': 12, 'total': 13},
+        }
+        max_comp_row = max_comp_col = None
+        msgs.append("WARNING: 未识别到 IRP002 表头，按旧版固定列位读取")
+        for r in range(ws.nrows):
+            if '最高偿付限额' in str(_safe_cell(ws, r, 1)):
+                max_comp_row, max_comp_col = r, 2
+                break
+
+    total_g = groups['total']
+    lte_g = groups['lte']
+    gt_g = groups['gt']
+
+    # --- 最高偿付限额 ---
+    if max_comp_row is not None and max_comp_col is not None:
+        max_comp = _get_cell_val(ws, max_comp_row, max_comp_col)
         msgs.append(f"最高偿付限额 (第{max_comp_row}行): {max_comp:,.0f} 元")
     else:
         max_comp = 0
@@ -193,9 +340,9 @@ def validate_irp002(filepath, irp001_path=None):
         ('高级管理人员', "3.高级管理人员在本机构存款"),
         ('被保险存款', "5.被保险存款"),
     ]
-    check_rows = {}  # {row_number: label}
+    check_rows = {}
     for kw, label in irp002_keywords:
-        r = _find_irp_row(ws, kw)
+        r = _find_irp_row(ws, kw, label_col)
         if r is not None:
             check_rows[r] = label
         else:
@@ -204,8 +351,8 @@ def validate_irp002(filepath, irp001_path=None):
     # --- 空数据检查 ---
     if check_rows:
         first_row = next(iter(check_rows))
-        sample_total = _get_cell_val(ws, first_row, 2)
-        sample_principal = _get_cell_val(ws, first_row, 3)
+        sample_total = _get_cell_val(ws, first_row, total_g['count'])
+        sample_principal = _get_cell_val(ws, first_row, total_g['principal'])
         if max_comp == 0 and sample_total == 0 and sample_principal == 0:
             msgs.append("WARNING: 读取到的关键数据均为0，可能是文件为空或格式不匹配！")
         elif max_comp == 0:
@@ -214,24 +361,25 @@ def validate_irp002(filepath, irp001_path=None):
     # --- (1) 户均本息合计校验 ---
     msgs.append("\n========== (1) 户均本息合计 校验 ==========")
     for r, name in check_rows.items():
-        cnt_lte = _get_cell_val(ws, r, 6)    # ≤限额户数
-        sum_lte = _get_cell_val(ws, r, 9)    # ≤限额本息合计
-        cnt_gt = _get_cell_val(ws, r, 10)    # >限额户数
-        sum_gt = _get_cell_val(ws, r, 13)    # >限额本息合计
+        cnt_lte = _get_cell_val(ws, r, lte_g['count'])
+        sum_lte = _get_cell_val(ws, r, lte_g['total'])
+        cnt_gt = _get_cell_val(ws, r, gt_g['count'])
+        sum_gt = _get_cell_val(ws, r, gt_g['total'])
 
         avg_lte = sum_lte / cnt_lte if cnt_lte > 0 else 0
         avg_gt = sum_gt / cnt_gt if cnt_gt > 0 else 0
-
         ok_lte = avg_lte <= max_comp if cnt_lte > 0 else True
         ok_gt = avg_gt > max_comp if cnt_gt > 0 else True
 
         msgs.append(f"  {name}:")
         if cnt_lte > 0:
-            msgs.append(f"    <= {max_comp:,.0f}: 户均={avg_lte:,.2f} [{'OK' if ok_lte else 'ERROR'}]")
+            msgs.append(f"    <= {max_comp:,.0f}: 户均={avg_lte:,.2f} "
+                        f"[{'OK' if ok_lte else 'ERROR'}]")
         else:
             msgs.append(f"    <= {max_comp:,.0f}: 无数据")
         if cnt_gt > 0:
-            msgs.append(f"    > {max_comp:,.0f}: 户均={avg_gt:,.2f} [{'OK' if ok_gt else 'ERROR'}]")
+            msgs.append(f"    > {max_comp:,.0f}: 户均={avg_gt:,.2f} "
+                        f"[{'OK' if ok_gt else 'ERROR'}]")
         else:
             msgs.append(f"    > {max_comp:,.0f}: 无数据")
 
@@ -239,87 +387,67 @@ def validate_irp002(filepath, irp001_path=None):
     msgs.append("\n========== (2) 分组合计 vs 总合计 校验 ==========")
     all_ok = True
     for r, name in check_rows.items():
-        col_defs = [
-            (2, 6, 10, "户数"),      # 合计列, ≤限额列, >限额列, 标签
-            (3, 7, 11, "本金"),
-            (4, 8, 12, "应付利息"),
-            (5, 9, 13, "本息合计"),
-        ]
         row_ok = True
-        for c_t, c_l, c_g, label in col_defs:
-            total = _get_cell_val(ws, r, c_t)
-            lte = _get_cell_val(ws, r, c_l)
-            gt = _get_cell_val(ws, r, c_g)
-            s = lte + gt
-            ok = abs(s - total) <= max(1, abs(total * 0.001))
+        for field, fname in (('count', '户数'), ('principal', '本金'),
+                             ('interest', '应付利息'), ('total', '本息合计')):
+            total_v = _get_cell_val(ws, r, total_g[field])
+            lte = _get_cell_val(ws, r, lte_g[field])
+            gt = _get_cell_val(ws, r, gt_g[field])
+            s_val = lte + gt
+            ok = abs(s_val - total_v) <= max(1, abs(total_v * 0.001))
             if not ok:
                 if row_ok:
                     msgs.append(f"  {name}: ERROR")
                     row_ok = False
                     all_ok = False
-                msgs.append(f"    {label}: {lte:,.2f} + {gt:,.2f} = {s:,.2f} != {total:,.2f}")
+                msgs.append(f"    {fname}: {lte:,.2f} + {gt:,.2f} = "
+                            f"{s_val:,.2f} != {total_v:,.2f}")
     if all_ok:
         msgs.append("  所有行校验通过")
     else:
         msgs.append("\n>>> 内部校验: 存在差异，请检查")
 
     # --- (3) IRP002 vs IRP001 交叉校验 ---
+    cross_ok = True
     if irp001_path:
         msgs.append("\n========== (3) IRP002 vs IRP001 交叉校验 ==========")
         try:
-            ws_irp = _ExcelSheet(str(irp001_path))
+            irp1_map = _read_irp001_map(irp001_path)
+            irp2_map = _read_irp002_map(filepath)
         except Exception as e:
-            msgs.append(f"  ERROR: 无法读取 IRP001: {e}")
-            msgs.append("\n>>> IRP002 校验结果: 内部校验" + ("全部通过" if all_ok else "存在差异"))
-            return msgs
-
-        # 交叉校验映射表
-        # (irp002关键词, irp001关键词, irp001章节关键词, irp002列, irp001列, 标签后缀)
+            msgs.append(f"  ERROR: 无法读取 IRP 申报表: {e}")
+            irp1_map = irp2_map = {}
         cross_pairs = [
-            ('境内存款',   '境内存款',            '',  3, 2, "本金"),
-            ('境内存款',   '境内存款',            '',  4, 3, "应付利息"),
-            ('个人存款',   '（一）个人存款',       '一、境内存款',  3, 2, "本金"),
-            ('个人存款',   '（一）个人存款',       '一、境内存款',  4, 3, "应付利息"),
-            ('单位存款',   '（二）单位存款',       '一、境内存款',  3, 2, "本金"),
-            ('单位存款',   '（二）单位存款',       '一、境内存款',  4, 3, "应付利息"),
-            ('被保险存款', '被保险存款余额',       '',  3, 2, "本金"),
-            ('被保险存款', '被保险存款余额',       '',  4, 3, "应付利息"),
+            ('一、境内存款', 'principal', '本金'),
+            ('一、境内存款', 'interest', '应付利息'),
+            ('（一）个人存款', 'principal', '本金'),
+            ('（一）个人存款', 'interest', '应付利息'),
+            ('（二）单位存款', 'principal', '本金'),
+            ('（二）单位存款', 'interest', '应付利息'),
+            ('被保险存款余额', 'principal', '本金'),
+            ('被保险存款余额', 'interest', '应付利息'),
         ]
-        cross_ok = True
-        for kw2, kw1, sec1, c2, c1, suffix in cross_pairs:
-            r2 = _find_irp_row(ws, kw2)
-            if r2 is None:
-                msgs.append(f"  WARNING: IRP002中未找到「{kw2}」")
+        for label, field, fname in cross_pairs:
+            v2 = (irp2_map.get(label) or {}).get(field)
+            v1 = (irp1_map.get(label) or {}).get(field)
+            if v2 is None or v1 is None:
+                msgs.append(f"  WARNING: {label}-{fname} 数据缺失，跳过")
                 continue
-            if sec1:
-                r1 = _find_irp_cross_rows(ws_irp, sec1, kw1)
-            else:
-                r1 = _find_irp_row(ws_irp, kw1)
-            if r1 is None:
-                msgs.append(f"  WARNING: IRP001中未找到「{kw1}」")
-                continue
-
-            label_item = f"{kw2}-{suffix}"
-            val_irp002 = _get_cell_val(ws, r2, c2)
-            val_irp001 = _get_cell_val(ws_irp, r1, c1)
-            diff = abs(val_irp002 - val_irp001)
-            ok = diff <= 0.001  # 绝对容差 0.001 元（严格一致）
-            status = "OK" if ok else "ERROR"
+            diff = abs(v2 - v1)
+            ok = diff <= 0.001
             if not ok:
                 cross_ok = False
             msgs.append(
-                f"  {label_item}: IRP002[{r2},{c2}]={val_irp002:,.2f}  "
-                f"IRP001[{r1},{c1}]={val_irp001:,.2f}  差额={diff:,.2f}  [{status}]")
-
+                f"  {label}-{fname}: IRP002={v2:,.2f}  "
+                f"IRP001={v1:,.2f}  差额={diff:,.2f}  "
+                f"[{'OK' if ok else 'ERROR'}]")
         if cross_ok:
             msgs.append("  IRP002与IRP001交叉校验全部通过")
         else:
             msgs.append("  IRP002与IRP001交叉校验存在差异，请检查")
 
     # --- 结论 ---
-    if all_ok and (not irp001_path):
-        msgs.append("\n>>> IRP002 校验结果: 全部通过")
-    elif all_ok and cross_ok:
+    if all_ok and cross_ok:
         msgs.append("\n>>> IRP002 校验结果: 全部通过")
     else:
         msgs.append("\n>>> IRP002 校验结果: 存在差异，请检查")
@@ -637,6 +765,11 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
         msgs.append("--- （3）表中 IRP001 列取数核对（与本表申报表文件比对）---")
         try:
             ws_irp = _ExcelSheet(str(irp001_path))
+            irp_layout = _detect_irp001_layout(ws_irp)
+            if irp_layout is None:
+                irp_layout = {'label_col': 1, 'principal_col': 2,
+                              'interest_col': 3, 'total_col': 4,
+                              'data_start': 0}
             file_ok = True
             for key, (kw, section) in {
                     '（一）个人存款': ('（一）个人存款', '一、境内存款'),
@@ -645,13 +778,12 @@ def validate_base_check_vs_irp001(base_check_path, irp001_path=None,
                     '（四）非存款类金融机构存款': ('（四）非存款类', None),
                     '高级管理人员': ('高级管理人员', None),
                     '四、不予保险的其他存款': ('不予保险', None)}.items():
-                r = (_find_irp_cross_rows(ws_irp, section, kw) if section
-                     else _find_irp_row(ws_irp, kw))
+                r = _find_irp_label_row(ws_irp, irp_layout, section, kw)
                 if r is None:
                     msgs.append(f"  {key}: IRP001 文件中未找到，跳过")
                     continue
-                f_p = _get_cell_val(ws_irp, r, 2)
-                f_i = _get_cell_val(ws_irp, r, 3)
+                f_p = _get_cell_val(ws_irp, r, irp_layout['principal_col'])
+                f_i = _get_cell_val(ws_irp, r, irp_layout['interest_col'])
                 t = irp.get(key, {})
                 ok = _diff_ok(t.get('principal', 0.0), f_p) and \
                     _diff_ok(t.get('interest', 0.0), f_i)
@@ -738,53 +870,64 @@ def _init_styles():
 
 def _read_irp001_map(filepath):
     """
-    读取 IRP001 全部项目数据。
+    读取 IRP001 全部项目数据（表头/列位自适应）。
 
-    IRP001 各行位置是固定的（0-indexed 行号已预定义）。
-    返回 {label: {principal, interest, total}} 字典。
+    通过表头识别标签列与"本金/应付利息/合计"列，再按行标签关键词
+    定位各项目行；兼容不同银行的 IRP001 行数/列位置差异。
+    识别失败时退回旧版固定列位（B列标签、C/D/E 本金/利息/合计）。
 
     参数:
         filepath (str): IRP001 文件路径
 
     返回:
-        dict: {项目标签: {principal, interest, total}}
+        dict: {项目标签: {'principal','interest','total'}}
     """
     ws = _ExcelSheet(str(filepath))
-    pairs = [
-        (12, '一、境内存款'),
-        (13, '（一）个人存款'),
-        (14, '（二）单位存款'),
-        (15, '住房公积金存款'),
-        (16, '社保基金存款'),
-        (17, '（三）财政性存款'),
-        (18, '1.国库定期存款'),
-        (19, '2.代理财政性存款'),
-        (20, '（四）非存款类金融机构存款'),
-        (21, '二、境外存款'),
-        (22, '境外个人存款'),
-        (23, '境外单位存款'),
-        (24, '（三）境外同业存放'),
-        (25, '高级管理人员'),
-        (27, '被保险存款余额'),
-        (28, '受保存款'),
-        (29, '被保险存款客户数'),
-        (30, '最高偿付限额以内客户数'),
+    layout = _detect_irp001_layout(ws)
+    if layout is None:
+        layout = {'label_col': 1, 'principal_col': 2, 'interest_col': 3,
+                  'total_col': 4, 'data_start': 0}
+    specs = [
+        ('一、境内存款', None, '一、境内存款'),
+        ('（一）个人存款', '一、境内存款', '（一）个人存款'),
+        ('（二）单位存款', '一、境内存款', '（二）单位存款'),
+        ('住房公积金存款', '一、境内存款', '住房公积金'),
+        ('社保基金存款', '一、境内存款', '社保基金'),
+        ('（三）财政性存款', None, '（三）财政性存款'),
+        ('1.国库定期存款', None, '国库定期'),
+        ('2.代理财政性存款', None, '代理财政性'),
+        ('（四）非存款类金融机构存款', None, '非存款类'),
+        ('二、境外存款', None, '二、境外存款'),
+        ('境外个人存款', '二、境外存款', '（一）个人存款'),
+        ('境外单位存款', '二、境外存款', '（二）单位存款'),
+        ('（三）境外同业存放', None, '境外同业存放'),
+        ('高级管理人员', None, '高级管理人员'),
+        ('被保险存款余额', None, '被保险存款余额'),
+        ('受保存款', None, '受保存款'),
+        ('被保险存款客户数', None, '被保险存款客户数'),
+        ('最高偿付限额以内客户数', None, '最高偿付限额以内客户数'),
     ]
     out = {}
-    for r, label in pairs:
-        out[label] = {
-            'principal': _get_cell_val(ws, r, 2),   # C列：本金
-            'interest': _get_cell_val(ws, r, 3),    # D列：应付利息
-            'total': _get_cell_val(ws, r, 4),       # E列：本息合计
-        }
+    for label, section, keyword in specs:
+        row = _find_irp_label_row(ws, layout, section, keyword)
+        if row is None:
+            continue
+        principal = _get_cell_val(ws, row, layout['principal_col'])
+        interest = _get_cell_val(ws, row, layout['interest_col'])
+        total_col = layout.get('total_col')
+        total = (_get_cell_val(ws, row, total_col)
+                 if total_col is not None else principal + interest)
+        out[label] = {'principal': principal, 'interest': interest,
+                      'total': total}
     return out
 
 
 def _read_irp002_map(filepath):
     """
-    读取 IRP002 各项目的合计列数据。
+    读取 IRP002 各项目的合计列数据（列位自适应）。
 
-    通过关键词动态查找行号，返回 {label: {principal, interest, total, count}}。
+    通过表头识别"户数/本金/应付利息/本息合计"三组列，再按行标签关键词
+    定位各项目行；识别失败时退回旧版固定列位。
 
     参数:
         filepath (str): IRP002 文件路径
@@ -793,6 +936,15 @@ def _read_irp002_map(filepath):
         dict: {项目标签: {principal, interest, total, count}}
     """
     ws = _ExcelSheet(str(filepath))
+    layout = _detect_irp002_layout(ws)
+    if layout is not None:
+        label_col = layout['label_col']
+        total_g = layout['groups']['total']
+        lte_g = layout['groups']['lte']
+    else:
+        label_col = 1
+        total_g = {'count': 2, 'principal': 3, 'interest': 4, 'total': 5}
+        lte_g = {'count': 6, 'principal': 7, 'interest': 8, 'total': 9}
     mapping = [
         ('1.境内存款',          '一、境内存款'),
         ('1.1 个人存款',        '（一）个人存款'),
@@ -810,34 +962,29 @@ def _read_irp002_map(filepath):
     ]
     out = {}
     for kw, label in mapping:
-        r = _find_irp_row(ws, kw)
+        r = _find_irp_row(ws, kw, label_col)
         if r is not None:
             out[label] = {
-                'principal': _get_cell_val(ws, r, 3),  # D列：本金合计
-                'interest': _get_cell_val(ws, r, 4),   # E列：利息合计
-                'total': _get_cell_val(ws, r, 5),      # F列：本息合计
-                'count': _get_cell_val(ws, r, 2),      # C列：户数合计
+                'principal': _get_cell_val(ws, r, total_g['principal']),
+                'interest': _get_cell_val(ws, r, total_g['interest']),
+                'total': _get_cell_val(ws, r, total_g['total']),
+                'count': _get_cell_val(ws, r, total_g['count']),
             }
-    # 受保存款
-    rs = _find_irp_row(ws, '5.1受保存款')
+    # 受保存款（只有一列金额，放在"户数"列上）
+    rs = _find_irp_row(ws, '受保存款', label_col)
     if rs is not None:
-        v = _get_cell_val(ws, rs, 2)
-        out['受保存款'] = {'principal': v, 'interest': 0, 'total': v, 'count': 0}
-    # 客户数
-    for kw, label in [('5.被保险存款', '被保险存款客户数'),
-                       ('5.被保险存款', '最高偿付限额以内客户数')]:
-        r = _find_irp_row(ws, kw)
-        if r is not None:
-            out[label] = out.get(label, {})
-            out[label]['count'] = _get_cell_val(ws, r, 2)
-    # 最高偿付限额以内客户数 → col 6 (≤限额户数)
-    r5 = _find_irp_row(ws, '5.被保险存款')
+        v = _get_cell_val(ws, rs, total_g['count'])
+        out['受保存款'] = {'principal': v, 'interest': 0,
+                           'total': v, 'count': 0}
+    # 客户数：被保险存款客户数取合计组户数；限额以内客户数取≤限额组户数
+    r5 = _find_irp_row(ws, '5.被保险存款', label_col)
     if r5 is not None:
-        cnt_lte = _get_cell_val(ws, r5, 6)
-        out['最高偿付限额以内客户数'] = out.get('最高偿付限额以内客户数', {})
-        out['最高偿付限额以内客户数']['count'] = cnt_lte
-    return out
+        out['被保险存款客户数'] = {'count':
+                                    _get_cell_val(ws, r5, total_g['count'])}
+        out['最高偿付限额以内客户数'] = {
+            'count': _get_cell_val(ws, r5, lte_g['count'])}
 
+    return out
 
 
 # ============================================================
