@@ -187,7 +187,9 @@ class BankSelector(QGroupBox):
     def _bind_template(self):
         bank = self.current_bank()
         info = self.mgr.template_info(bank)
-        start = os.path.dirname(info.get('path') or '') or os.path.expanduser('~')
+        start = self.mgr.library_dir
+        if not os.path.isdir(start):
+            start = os.path.dirname(info.get('path') or '') or os.path.expanduser('~')
         path, _ = QFileDialog.getOpenFileName(
             self, f'为「{bank}」选择模板文件', start,
             'Excel 模板 (*.xlsx *.xlsm);;所有文件 (*)')
@@ -237,7 +239,8 @@ class BankManageDialog(QDialog):
         tip = QLabel(
             '每种银行类型绑定一个《保费基数核对表》模板文件。可以把绑定更换为'
             '任意 .xlsx 模板；也可以新增银行类型、导入（新增）模板文件。\n'
-            '绑定关系保存在：' + self.mgr.config_path)
+            '导入的模板会复制到模板库并自动登记保存，下次打开可直接选用，'
+            '无需再次导入。\n绑定关系保存在：' + self.mgr.config_path)
         tip.setWordWrap(True)
         tip.setFont(QFont('Microsoft YaHei', 9))
         tip.setStyleSheet('color:#555;')
@@ -260,7 +263,28 @@ class BankManageDialog(QDialog):
             3, QHeaderView.ResizeToContents)
         self.table.doubleClicked.connect(lambda *_: self._open_template())
         self.table.itemSelectionChanged.connect(self._update_buttons)
-        layout.addWidget(self.table, 1)
+        layout.addWidget(self.table, 2)
+
+        tpl_tip = QLabel('模板库（导入后自动保存，可重复使用）')
+        tpl_tip.setFont(QFont('Microsoft YaHei', 9))
+        tpl_tip.setStyleSheet('color:#555;')
+        layout.addWidget(tpl_tip)
+        self.tpl_table = QTableWidget(0, 3)
+        self.tpl_table.setHorizontalHeaderLabels(['模板文件', '状态', '备注'])
+        self.tpl_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tpl_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tpl_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tpl_table.verticalHeader().setVisible(False)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeToContents)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents)
+        self.tpl_table.doubleClicked.connect(
+            lambda *_: self._open_library_template())
+        self.tpl_table.itemSelectionChanged.connect(self._update_buttons)
+        layout.addWidget(self.tpl_table, 1)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
@@ -277,6 +301,9 @@ class BankManageDialog(QDialog):
         self.btn_import = _small_btn('导入模板（新增模板）…',
                                      '把其他 .xlsx 模板复制到模板库并登记')
         self.btn_open_lib = _small_btn('打开模板库文件夹')
+        self.btn_bind_lib = _small_btn(
+            '绑定选中模板给当前银行',
+            '把下方模板库中选中的模板绑定给上方选中的银行类型')
         self.btn_close = _small_btn('关闭')
 
         grid.addWidget(self.btn_add, 0, 0)
@@ -287,6 +314,7 @@ class BankManageDialog(QDialog):
         grid.addWidget(self.btn_open, 1, 2)
         grid.addWidget(self.btn_import, 2, 0)
         grid.addWidget(self.btn_open_lib, 2, 1)
+        grid.addWidget(self.btn_bind_lib, 2, 2)
         grid.addWidget(self.btn_close, 2, 3)
         layout.addLayout(grid)
 
@@ -298,6 +326,7 @@ class BankManageDialog(QDialog):
         self.btn_open.clicked.connect(self._open_template)
         self.btn_import.clicked.connect(self._import_template)
         self.btn_open_lib.clicked.connect(self._open_library)
+        self.btn_bind_lib.clicked.connect(self._bind_library_template)
         self.btn_close.clicked.connect(self.accept)
 
     # ---------------- 数据刷新 ----------------
@@ -335,7 +364,33 @@ class BankManageDialog(QDialog):
                 select_row = row
         if self.table.rowCount():
             self.table.selectRow(select_row)
+        self._refresh_template_table()
         self._update_buttons()
+
+    def _refresh_template_table(self):
+        """刷新模板库列表（读取 bank_bindings.json 中已登记的模板）。"""
+        self.tpl_table.setRowCount(0)
+        try:
+            templates = self.mgr.template_library()
+        except Exception:
+            templates = []
+        for info in templates:
+            path = info.get('path') or ''
+            row = self.tpl_table.rowCount()
+            self.tpl_table.insertRow(row)
+            values = [
+                os.path.basename(path) or path,
+                '✓ 存在' if info.get('exists') else '✗ 缺失',
+                '默认模板' if info.get('is_default') else '导入模板',
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(str(text))
+                if col == 1:
+                    item.setForeground(
+                        Qt.darkGreen if info.get('exists') else Qt.red)
+                if col == 0:
+                    item.setToolTip(path)
+                self.tpl_table.setItem(row, col, item)
 
     def _selected_bank(self):
         row = self.table.currentRow()
@@ -353,8 +408,48 @@ class BankManageDialog(QDialog):
         if has:
             info = self.mgr.template_info(bank)
             self.btn_open.setEnabled(bool(info.get('exists')))
+        tpl_ok = self._selected_library_template() is not None
+        self.btn_bind_lib.setEnabled(has and tpl_ok)
 
     # ---------------- 操作 ----------------
+
+    def _selected_library_template(self):
+        """返回模板库表格中选中的模板路径（不存在返回 None）。"""
+        row = self.tpl_table.currentRow()
+        if row < 0 or row >= self.tpl_table.rowCount():
+            return None
+        item = self.tpl_table.item(row, 0)
+        if item is None:
+            return None
+        path = item.toolTip()
+        if path and os.path.isfile(path):
+            return path
+        return None
+
+    def _open_library_template(self):
+        """双击模板库列表：打开该模板文件。"""
+        path = self._selected_library_template()
+        if not path:
+            self._warn('该模板文件不存在，请重新导入。')
+            return
+        open_path(path)
+
+    def _bind_library_template(self):
+        """把模板库中选中的模板绑定给当前选中的银行类型。"""
+        bank = self._selected_bank()
+        path = self._selected_library_template()
+        if not bank:
+            self._warn('请先在上方选择银行类型。')
+            return
+        if not path:
+            self._warn('请在下方模板库中选择一个存在的模板。')
+            return
+        ok, msg = self.mgr.bind_template(bank, path)
+        if not ok:
+            self._warn(msg)
+            return
+        self.refresh()
+        self._info(msg)
 
     def _warn(self, msg):
         QMessageBox.warning(self, '提示', msg)

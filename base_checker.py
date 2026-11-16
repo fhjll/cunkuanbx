@@ -932,7 +932,7 @@ class BaseChecker:
         """初始化生成器，清空全部数据容器"""
         self.a1411_data = {}      # A1411 {科目代码: 余额（万元）}
         self.a2411_data = {}      # A2411 {科目代码: 余额（万元）}
-        self.acct_data = {}       # 科目余额表 {科目代码: 余额（元）}
+        self.acct_data = {}       # 科目余额表 {科目代码: {'debit':借方,'credit':贷方}}
         self.irp001_p = {}        # IRP001 {(章节关键词, 项目关键词): 本金（元）}
         self.irp001_i = {}        # IRP001 {(章节关键词, 项目关键词): 应付利息（元）}
         self.att2_value = None    # 附件2（住房公积金）本金合计（元）——参考值
@@ -1040,8 +1040,10 @@ class BaseChecker:
                     continue
                 debit = to_float(_sheet_cell(ws, r, debit_col))
                 credit = to_float(_sheet_cell(ws, r, credit_col))
+                # 借贷两列都保留：取数时由科目代码是否带负号决定取哪一列
+                # （不带负号取贷方、带负号取借方，见 lookup_acct）
                 if code not in self.acct_data:
-                    self.acct_data[code] = debit if debit != 0 else credit
+                    self.acct_data[code] = {'debit': debit, 'credit': credit}
         for sname, ly in detected:
             self.messages.append(
                 f"  科目余额表[{sname}]: 表头第{ly['header_row'] + 1}行，"
@@ -1174,19 +1176,29 @@ class BaseChecker:
         """
         按科目代码从科目余额表取数（元）。
 
+        取数规则（按模板中的科目代码写法区分借贷方向）：
+          · 不带负号：取该科目的"贷方余额"；
+          · 带负号（如 -671106）：取该科目的"借方余额"。
+        这样资产/支出类科目可在模板中用负号显式指定借方，避免原来的
+        "借方非零就取借方"造成的方向混用。
+
         参数:
-            code (str): 科目代码
+            code (str): 科目代码（可带负号）
 
         返回:
             float: 科目余额（元），未匹配返回 0
         """
-        code = _clean_code(code)
+        neg, code = _split_acct_code(code)
         if not code:
             return 0.0
-        if code in self.acct_data:
-            return self.acct_data[code]
-        self.not_found_acct.append(code)
-        return 0.0
+        entry = self.acct_data.get(code)
+        if entry is None:
+            self.not_found_acct.append(code)
+            return 0.0
+        if isinstance(entry, dict):
+            return to_float(entry['debit'] if neg else entry['credit'])
+        # 兼容旧格式（单值）
+        return to_float(entry)
 
     # ----------------------------------------------------------
     # 主流程
@@ -1264,12 +1276,13 @@ class BaseChecker:
                 filled_f += 1
 
         # 会计科目（本金/利息金额列）：按科目代码从科目余额表取数（元）
+        # 代码允许带负号：带负号取借方余额，不带负号取贷方余额
         for r, info in rows_data.items():
-            if info['p_code'] and info['p_code'].isdigit():
+            if _is_acct_code(info['p_code']):
                 values[(layout['acct_p_amount'], r)] = round(
                     self.lookup_acct(info['p_code']), 2)
                 filled_i += 1
-            if info['i_code'] and info['i_code'].isdigit():
+            if _is_acct_code(info['i_code']):
                 values[(layout['acct_i_amount'], r)] = round(
                     self.lookup_acct(info['i_code']), 2)
                 filled_l += 1
@@ -1502,8 +1515,7 @@ class BaseChecker:
         def has_code(row):
             info = rows_data.get(row) or {}
             for key in ('p_code', 'i_code'):
-                code = info.get(key) or ''
-                if code.isdigit():
+                if _is_acct_code(info.get(key)):
                     return True
             return False
 
@@ -2000,6 +2012,31 @@ def _clean_code(value):
     if re.fullmatch(r'\d+\.0+', text):
         return text.split('.')[0]
     return text
+
+def _split_acct_code(value):
+    """
+    拆分"带负号的科目代码"。
+
+    模板中科目代码可写成：
+      · 2003   → 取贷方余额
+      · -671106 → 取借方余额（负号可为半角/全角）
+
+    返回:
+        tuple: (是否负号, 纯科目代码字符串)
+    """
+    raw = _text(value)
+    neg = False
+    while raw[:1] in ('-', '－', '—', '−'):
+        neg = not neg
+        raw = raw[1:]
+    return neg, _clean_code(raw)
+
+
+def _is_acct_code(value):
+    """是否为可用的科目代码（允许带负号，如 -671106）。"""
+    _neg, code = _split_acct_code(value)
+    return bool(code) and code.isdigit()
+
 
 def read_adjustments(filepath):
     """

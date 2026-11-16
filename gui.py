@@ -52,7 +52,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog,
     QGroupBox, QMessageBox, QProgressBar, QScrollArea, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView,
-    QStackedWidget,
+    QStackedWidget, QStyledItemDelegate,
 )
 from PyQt5.QtCore import Qt, QThread, QRect, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPixmap
@@ -367,6 +367,47 @@ class ValidationSeqThread(QThread):
 # ============================================================
 # 启动首页（背景图片 + 开始核查）
 # ============================================================
+
+class AmountDelegate(QStyledItemDelegate):
+    """
+    调整项"金额（元）"列编辑器。
+
+    说明：
+      · 用普通 QLineEdit + 提交时解析，不设置会拦截按键的校验器，
+        保证数字小键盘（NumPad）输入数字/小数点时正常响应；
+      · 进入编辑时去掉千分位并全选，便于直接覆盖输入；
+      · 提交时容错解析千分位逗号、中文逗号、空格，非法内容按 0 处理。
+    """
+
+    def __init__(self, formatter, parent=None):
+        super().__init__(parent)
+        self._fmt = formatter
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setFont(QFont("Microsoft YaHei", 9))
+        editor.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        editor.setToolTip("可直接用数字小键盘输入金额（支持两位小数）")
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = str(index.data(Qt.EditRole) or '')
+        for ch in (',', '，', ' ', '\u3000'):
+            text = text.replace(ch, '')
+        editor.setText(text)
+        editor.selectAll()
+        editor.setFocus()
+
+    def setModelData(self, editor, model, index):
+        text = editor.text()
+        for ch in (',', '，', ' ', '\u3000', '元'):
+            text = text.replace(ch, '')
+        try:
+            value = float(text) if text.strip() not in ('', '-', '+', '.', '-.', '+.') else 0.0
+        except (TypeError, ValueError):
+            value = 0.0
+        model.setData(index, self._fmt(value), Qt.EditRole)
+
 
 class HomePage(QWidget):
     """
@@ -736,6 +777,12 @@ class MainWindow(QMainWindow):
         self.tb_adj.verticalHeader().setDefaultSectionSize(26)
         self.tb_adj.setMinimumHeight(150)
         self.tb_adj.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # 选中单元格后可直接键入数字（含数字小键盘）开始编辑
+        self.tb_adj.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
+        self.tb_adj.setItemDelegateForColumn(
+            5, AmountDelegate(self._fmt_amount, self.tb_adj))
         header = self.tb_adj.horizontalHeader()
         for idx in (1, 2, 3, 4):
             header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
