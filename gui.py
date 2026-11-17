@@ -52,7 +52,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog,
     QGroupBox, QMessageBox, QProgressBar, QScrollArea, QFrame, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView,
-    QStackedWidget, QStyledItemDelegate,
+    QStackedWidget,
 )
 from PyQt5.QtCore import Qt, QThread, QRect, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPixmap
@@ -365,48 +365,87 @@ class ValidationSeqThread(QThread):
 
 
 # ============================================================
-# 启动首页（背景图片 + 开始核查）
+# 调整项金额输入框（常显单元格控件）
 # ============================================================
 
-class AmountDelegate(QStyledItemDelegate):
+class AmountEdit(QLineEdit):
     """
-    调整项"金额（元）"列编辑器。
+    调整项"金额（元）"输入框（常显单元格控件）。
 
-    说明：
-      · 用普通 QLineEdit + 提交时解析，不设置会拦截按键的校验器，
-        保证数字小键盘（NumPad）输入数字/小数点时正常响应；
-      · 进入编辑时去掉千分位并全选，便于直接覆盖输入；
-      · 提交时容错解析千分位逗号、中文逗号、空格，非法内容按 0 处理。
+    之所以不用表格项编辑器，是为了保证任何输入法/键盘环境下数字小键盘
+    都能直接输入（无需先双击进入编辑状态）：
+      · 单击即可输入，获得焦点时去掉千分位并全选；
+      · 支持数字小键盘；若 NumLock 关闭（小键盘发方向键），也会把
+        小键盘的 0~9/小数点映射为数字；
+      · 失去焦点或回车时自动解析并按千分位格式化。
     """
 
-    def __init__(self, formatter, parent=None):
+
+    def __init__(self, amount, formatter, parent=None):
         super().__init__(parent)
         self._fmt = formatter
+        self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.setFont(QFont("Microsoft YaHei", 9))
+        self.setToolTip("可直接输入金额（支持数字小键盘、两位小数；若小键盘无效请确认 NumLock 已开启）")
+        self.setText(formatter(amount))
+        self.editingFinished.connect(self._normalize)
 
-    def createEditor(self, parent, option, index):
-        editor = QLineEdit(parent)
-        editor.setFont(QFont("Microsoft YaHei", 9))
-        editor.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        editor.setToolTip("可直接用数字小键盘输入金额（支持两位小数）")
-        return editor
-
-    def setEditorData(self, editor, index):
-        text = str(index.data(Qt.EditRole) or '')
-        for ch in (',', '，', ' ', '\u3000'):
+    def _raw_text(self):
+        text = self.text()
+        # 兼容全角/中文符号：全角负号、短横线、加号、千分位逗号
+        for ch in ('－', '−', '—', '﹣'):
+            text = text.replace(ch, '-')
+        text = text.replace('＋', '+')
+        for ch in (',', '，', ' ', '\u3000', '\xa0', '元'):
             text = text.replace(ch, '')
-        editor.setText(text)
-        editor.selectAll()
-        editor.setFocus()
+        return text
 
-    def setModelData(self, editor, model, index):
-        text = editor.text()
-        for ch in (',', '，', ' ', '\u3000', '元'):
-            text = text.replace(ch, '')
-        try:
-            value = float(text) if text.strip() not in ('', '-', '+', '.', '-.', '+.') else 0.0
-        except (TypeError, ValueError):
-            value = 0.0
-        model.setData(index, self._fmt(value), Qt.EditRole)
+    def _normalize(self):
+        from common import to_float
+        value = to_float(self._raw_text())
+        self.setText(self._fmt(value))
+
+    def value(self):
+        from common import to_float
+        return to_float(self._raw_text())
+
+    def focusInEvent(self, event):
+        self.setText(self._raw_text())
+        self.selectAll()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._normalize()
+        super().focusOutEvent(event)
+
+    # NumLock 关闭时，小键盘按键会变成方向/编辑键；映射回数字
+    _NUMPAD_KEYS = {
+        Qt.Key_Insert: '0', Qt.Key_End: '1', Qt.Key_Down: '2',
+        Qt.Key_PageDown: '3', Qt.Key_Left: '4', Qt.Key_Clear: '5',
+        Qt.Key_Right: '6', Qt.Key_Home: '7', Qt.Key_Up: '8',
+        Qt.Key_PageUp: '9', Qt.Key_Delete: '.', Qt.Key_Comma: '.',
+    }
+    # 银河麒麟/UOS 等 Linux(X11) 下 NumLock 关闭时，小键盘会发方向键且
+    # 不一定带 KeypadModifier，用 X11 keycode 再兜底映射一次
+    _LINUX_NUMPAD_SCAN = {
+        79: '7', 80: '8', 81: '9',
+        83: '4', 84: '5', 85: '6',
+        87: '1', 88: '2', 89: '3',
+        90: '0', 91: '.',
+    }
+
+    def keyPressEvent(self, event):
+        # 保证数字小键盘（含 NumLock 关闭的情况）可用
+        if event.modifiers() & Qt.KeypadModifier:
+            ch = self._NUMPAD_KEYS.get(event.key())
+            if ch is not None:
+                self.insert(ch)
+                return
+        if (sys.platform.startswith('linux') and not event.text()
+                and event.nativeScanCode() in self._LINUX_NUMPAD_SCAN):
+            self.insert(self._LINUX_NUMPAD_SCAN[event.nativeScanCode()])
+            return
+        super().keyPressEvent(event)
 
 
 class HomePage(QWidget):
@@ -781,8 +820,6 @@ class MainWindow(QMainWindow):
         self.tb_adj.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
             | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
-        self.tb_adj.setItemDelegateForColumn(
-            5, AmountDelegate(self._fmt_amount, self.tb_adj))
         header = self.tb_adj.horizontalHeader()
         for idx in (1, 2, 3, 4):
             header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
@@ -1059,13 +1096,13 @@ class MainWindow(QMainWindow):
         scope_combo.currentTextChanged.connect(
             lambda text, combo=scope_combo: self._on_adj_scope_changed_by(combo))
 
-        # 金额（元）
+        # 金额（元）：常显输入框，单击即可输入（支持数字小键盘）
         amount = item.get('amount', 0.0)
-        amount_item = QTableWidgetItem(self._fmt_amount(amount))
-        amount_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        amount_edit = AmountEdit(amount, self._fmt_amount, self.tb_adj)
         if locked:
-            amount_item.setBackground(self._locked_brush())
-        self.tb_adj.setItem(row, 5, amount_item)
+            amount_edit.setStyleSheet(
+                "QLineEdit { background:#f0f0f0; border:1px solid #d0d0d0; }")
+        self.tb_adj.setCellWidget(row, 5, amount_edit)
 
         self._on_adj_scope_changed(row)
 
@@ -1161,6 +1198,7 @@ class MainWindow(QMainWindow):
         for row in range(self.tb_adj.rowCount()):
             name_widget = self.tb_adj.item(row, 0)
             amount_widget = self.tb_adj.item(row, 5)
+            amount_edit = self.tb_adj.cellWidget(row, 5)
             combo = lambda col: (self.tb_adj.cellWidget(row, col).currentText()
                                  if self.tb_adj.cellWidget(row, col) else '')
             items.append({
@@ -1169,8 +1207,10 @@ class MainWindow(QMainWindow):
                 'target': combo(2),
                 'field': combo(3),
                 'mode': combo(4),
-                'amount': self._parse_amount(amount_widget.text()
-                                             if amount_widget else ''),
+                'amount': (amount_edit.value()
+                           if isinstance(amount_edit, AmountEdit)
+                           else self._parse_amount(
+                               amount_widget.text() if amount_widget else '')),
                 'locked': self._is_locked_row(row),
             })
         return normalize_adjustments(items)

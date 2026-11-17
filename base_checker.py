@@ -1188,17 +1188,22 @@ class BaseChecker:
         返回:
             float: 科目余额（元），未匹配返回 0
         """
-        neg, code = _split_acct_code(code)
+        mode, code = _split_acct_code(code)
         if not code:
             return 0.0
         entry = self.acct_data.get(code)
         if entry is None:
             self.not_found_acct.append(code)
             return 0.0
-        if isinstance(entry, dict):
-            return to_float(entry['debit'] if neg else entry['credit'])
-        # 兼容旧格式（单值）
-        return to_float(entry)
+        if not isinstance(entry, dict):
+            # 兼容旧格式（单值）
+            return to_float(entry)
+        debit = to_float(entry.get('debit', 0.0))
+        credit = to_float(entry.get('credit', 0.0))
+        if mode is None:
+            # ± 号 / 未指定：按余额方向自动取（借方非零取借方）
+            return debit if debit != 0 else credit
+        return debit if mode else credit
 
     # ----------------------------------------------------------
     # 主流程
@@ -1291,6 +1296,7 @@ class BaseChecker:
             f"明细取数: 存款归属({layout['dep_amount']})={filled_f}行, "
             f"科目本金({layout['acct_p_amount']})={filled_i}行, "
             f"科目利息({layout['acct_i_amount']})={filled_l}行")
+        self.messages.extend(self._describe_acct_directions(rows_data))
 
         # ----- 调整项（可自定义的项目列表）-----
         # 会计科目表类项目 → 汇总后叠加到对应合计项（见 Step 3b）
@@ -1640,6 +1646,53 @@ class BaseChecker:
                 + f" → {base:,.2f}；{'加' if net > 0 else '扣减'}调整项 "
                 f"{abs(net):,.2f} = 最终 {base + net:,.2f}（第{row}行{col}列）")
         return set(adjusted)
+
+    def _describe_acct_directions(self, rows_data):
+        """
+        输出科目取数方向的提示（帮助核对模板中 ± 号写法是否正确）。
+
+        对模板中用到的每个科目代码：
+          · 若模板代码要求的借/贷方向余额为 0，而另一方向有余额
+            → 提示应该在该代码前加/去掉负号；
+          · 若该科目借方、贷方都有余额
+            → 提示当前取的是哪一方，便于确认方向。
+        """
+        msgs = []
+        seen = set()
+        for info in rows_data.values():
+            for key in ('p_code', 'i_code'):
+                code = info.get(key) or ''
+                mode, base = _split_acct_code(code)
+                if not base or not base.isdigit() or base in seen:
+                    continue
+                seen.add(base)
+                entry = self.acct_data.get(base)
+                if not isinstance(entry, dict):
+                    continue
+                debit = to_float(entry.get('debit', 0.0))
+                credit = to_float(entry.get('credit', 0.0))
+                if mode is None:
+                    if debit and credit:
+                        msgs.append(
+                            f"  ℹ 科目 {base}：未写方向（±），借方 "
+                            f"{debit:,.2f} / 贷方 {credit:,.2f}，"
+                            f"当前自动取借方 {debit:,.2f}")
+                    continue
+                if mode and debit == 0 and credit != 0:
+                    msgs.append(
+                        f"  ⚠ 科目 -{base}：按借方取数为 0（该科目贷方有 "
+                        f"{credit:,.2f}）；如需取贷方请去掉负号")
+                elif not mode and credit == 0 and debit != 0:
+                    msgs.append(
+                        f"  ⚠ 科目 {base}：按贷方取数为 0（该科目借方有 "
+                        f"{debit:,.2f}）；如需取借方请把代码写成 -{base}")
+                elif debit and credit:
+                    side = '借方' if mode else '贷方'
+                    value = debit if mode else credit
+                    msgs.append(
+                        f"  ℹ 科目 {base}：借方 {debit:,.2f} / 贷方 "
+                        f"{credit:,.2f}，当前按模板代码取{side} {value:,.2f}")
+        return msgs
 
     @staticmethod
     def _find_deposit_total_rows(rows_data, formulas, ws_check, dep_col,
@@ -2015,26 +2068,71 @@ def _clean_code(value):
 
 def _split_acct_code(value):
     """
-    拆分"带负号的科目代码"。
+    拆分"带方向标记的科目代码"。
 
     模板中科目代码可写成：
-      · 2003   → 取贷方余额
-      · -671106 → 取借方余额（负号可为半角/全角）
+      · 2003 / +2003 / 2003贷 / 贷2003   → 取贷方余额（默认）
+      · -671106 / －671106 / 671106借     → 取借方余额
+      · ±2003                            → 按科目余额方向自动取
+                                           （借方非零取借方，否则取贷方）
+    支持：半角/全角正负号、前/后方向文字（借/贷、括号形式）、空格。
 
     返回:
-        tuple: (是否负号, 纯科目代码字符串)
+        tuple: (方向, 纯科目代码字符串)
+               方向 True=借方、False=贷方、None=自动
     """
     raw = _text(value)
-    neg = False
-    while raw[:1] in ('-', '－', '—', '−'):
-        neg = not neg
+    for ch in (' ', '\u3000', '\xa0'):
+        raw = raw.replace(ch, '')
+    # 去掉整体包裹的括号：如 (-671106)
+    while ((raw.startswith('(') and raw.endswith(')'))
+           or (raw.startswith('（') and raw.endswith('）'))):
+        raw = raw[1:-1]
+
+    mode = False                     # 默认：贷方
+    auto = False
+    if raw.startswith(('±', '+-')):
+        auto = True
+        raw = raw[1:] if raw[0] == '±' else raw[2:]
+
+    # 方向文字后缀
+    for suffix, is_debit in (('（借方）', True), ('(借方)', True),
+                             ('借方', True), ('（借）', True),
+                             ('(借)', True), ('借', True),
+                             ('（贷方）', False), ('(贷方)', False),
+                             ('贷方', False), ('（贷）', False),
+                             ('(贷)', False), ('贷', False)):
+        if raw.endswith(suffix):
+            mode = is_debit
+            raw = raw[:-len(suffix)]
+            break
+    # 方向文字前缀
+    for prefix, is_debit in (('（借方）', True), ('(借方)', True),
+                             ('（借）', True), ('(借)', True),
+                             ('借方', True), ('借：', True), ('借:', True),
+                             ('借', True), ('（贷方）', False),
+                             ('(贷方)', False), ('（贷）', False),
+                             ('(贷)', False), ('贷方', False),
+                             ('贷：', False), ('贷:', False), ('贷', False)):
+        if raw.startswith(prefix):
+            mode = is_debit
+            raw = raw[len(prefix):]
+            break
+    # 前/后正负号（“-”取借方、“+”取贷方；全角/短破折号等一并兼容）
+    while raw[:1] in ('-', '－', '—', '−', '+', '＋'):
+        mode = raw[0] in ('-', '－', '—', '−')
+        auto = False
         raw = raw[1:]
-    return neg, _clean_code(raw)
+    while raw[-1:] in ('-', '－', '—', '−', '+', '＋'):
+        mode = raw[-1] in ('-', '－', '—', '−')
+        auto = False
+        raw = raw[:-1]
+    return (None if auto else mode), _clean_code(raw)
 
 
 def _is_acct_code(value):
     """是否为可用的科目代码（允许带负号，如 -671106）。"""
-    _neg, code = _split_acct_code(value)
+    _mode, code = _split_acct_code(value)
     return bool(code) and code.isdigit()
 
 
