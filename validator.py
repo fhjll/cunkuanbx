@@ -1077,8 +1077,10 @@ def _cmp_text(left_name, left_val, right_name, right_val, tol, unit='元'):
         return NO_DATA_TEXT, False
     if abs(left_val - right_val) <= tol:
         return MATCH_TEXT, False
+    diff = abs(left_val - right_val)
     return (f"{left_name} {left_val:,.2f} {unit} / "
-            f"{right_name} {right_val:,.2f} {unit}"), True
+            f"{right_name} {right_val:,.2f} {unit}，"
+            f"差额 {diff:,.2f} {unit}"), True
 
 
 def _irp002_result_text(label, irp001_item, irp002_item):
@@ -1101,7 +1103,8 @@ def _irp002_result_text(label, irp001_item, irp002_item):
         right = irp001_item.get('principal', 0.0) or 0.0
         if abs(left - right) <= TOL_YUAN:
             return MATCH_TEXT, False
-        return (f"户数不一致：IRP002 {left:,.0f} 户 / IRP001 {right:,.0f} 户",
+        return (f"户数不一致：IRP002 {left:,.0f} 户 / IRP001 {right:,.0f} 户，"
+                f"差额 {abs(left - right):,.0f} 户",
                 True)
     parts = []
     for field, fname in (('principal', '本金'), ('interest', '利息'),
@@ -1114,7 +1117,8 @@ def _irp002_result_text(label, irp001_item, irp002_item):
             # 受保存款等只有本金口径：IRP001 合计为空时用其本金比较
             rv = irp001_item.get('principal', 0.0)
         if not _diff_ok(lv, rv):
-            parts.append(f"{fname} IRP002 {lv:,.2f} / IRP001 {rv:,.2f}")
+            parts.append(f"{fname} IRP002 {lv:,.2f} / IRP001 {rv:,.2f}，"
+                         f"差额 {abs(lv - rv):,.2f}")
     if parts:
         return "不一致（" + "；".join(parts) + "）", True
     return MATCH_TEXT, False
@@ -1157,7 +1161,8 @@ def generate_validation_report(irp001_path, output_path,
     填写约定：
       · 没有数据的单元格        → “无对应数据”
       · 核对一致                → “核对一致”
-      · 核对不一致              → 把两个值都写出来（如 “存款归属 992,503.00 万元 / IRP001 992,532.00 万元”）
+      · 核对不一致              → 把两个值都写出来，并在末尾附上差额
+                                  （如 “存款归属 992,503.00 万元 / IRP001 992,532.00 万元，差额 29.00 万元”）
 
     参数:
         irp001_path:     IRP001 申报表路径（基准数据源，必填）
@@ -1305,8 +1310,10 @@ def generate_validation_report(irp001_path, output_path,
             if abs(dep_wan - irp_wan) <= TOL_WAN:
                 c_text, c_err = MATCH_TEXT, False
             else:
+                c_diff = abs(dep_wan - irp_wan)
                 c_text = (f"存款归属表 {dep_wan:,.0f} 万元 / "
-                          f"IRP001 {irp_wan:,.0f} 万元")
+                          f"IRP001 {irp_wan:,.0f} 万元，"
+                          f"差额 {c_diff:,.0f} 万元")
                 c_err = True
         else:
             c_text, c_err = NO_DATA_TEXT, False
@@ -1379,7 +1386,7 @@ def generate_validation_report(irp001_path, output_path,
                 + ("；最后一列＝IRP001与IRP002校验结果（核对一致/不一致/无对应数据）"
                    if irp2check_col else "")
                 + "。填写约定：无对应数据＝该口径没有这项数据；核对一致＝在容差内相等"
-                f"（元级 {TOL_YUAN:g} 元）；核对不一致＝列出双方数值（红色底）。")
+                f"（元级 {TOL_YUAN:g} 元）；核对不一致＝列出双方数值及差额（红色底）。")
             cell.font = Font(name='微软雅黑', size=9, italic=True, color="666666")
             cell.alignment = Alignment(horizontal='left', vertical='center')
             break
