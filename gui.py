@@ -9,7 +9,7 @@
 界面布局（从上到下，单页面可滚动）：
   第〇部分 — 银行类型 / 模板绑定（独立模块 bank_selector.BankSelector）
   第一部分 — 工作目录（文件夹路径 + 文件匹配状态表格）
-  第二部分 — 调整值设置（可自由增删的调整项表格）
+  第二部分 — 调整值设置（A2411 外币折算汇率 + 可自由增删的调整项表格）
   第三部分 — 操作按钮（3个主要操作按钮 + 进度条）
   第四部分 — 运行日志（黑色背景的日志输出区）
 
@@ -77,6 +77,11 @@ BASE_DIR = str(Path(__file__).parent)
 
 # 调整项配置文件（保存在工作目录，随机构切换自动载入）
 ADJ_CONFIG_NAME = '调整值配置.json'
+
+# A2411 外币折算汇率默认值（1 美元折人民币元）。
+# A2411 月报表余额单位为万美元，生成存款归属表时按“余额 × 汇率”折算为
+# 万元人民币；A1411 人民币报表不折算。界面可修改，随调整值配置保存。
+DEFAULT_FX_RATE = 7.0
 
 
 # ============================================================
@@ -255,7 +260,7 @@ class BaseCheckThread(QThread):
 
     def __init__(self, a1411, a2411, acct_balance, irp001, template, output,
                  attachment2=None, attachment3=None, attachment4=None,
-                 adjustments=None):
+                 adjustments=None, fx_rate=1.0):
         super().__init__()
         self.a1411, self.a2411 = a1411, a2411
         self.acct_balance, self.irp001 = acct_balance, irp001
@@ -263,10 +268,12 @@ class BaseCheckThread(QThread):
         self.attachment2, self.attachment3, self.attachment4 = (
             attachment2, attachment3, attachment4)
         self.adjustments = adjustments or []
+        self.fx_rate = fx_rate
 
     def run(self):
         try:
             checker = BaseChecker()
+            checker.set_exchange_rate(self.fx_rate)
             self.progress.emit("正在加载 A1411...")
             checker.load_a1411(self.a1411)
             self.progress.emit("正在加载 A2411...")
@@ -370,23 +377,24 @@ class ValidationSeqThread(QThread):
 
 class AmountEdit(QLineEdit):
     """
-    调整项"金额（元）"输入框（常显单元格控件）。
+    调整项金额 / 汇率数值输入框（常显单元格控件）。
 
     之所以不用表格项编辑器，是为了保证任何输入法/键盘环境下数字小键盘
     都能直接输入（无需先双击进入编辑状态）：
       · 单击即可输入，获得焦点时去掉千分位并全选；
-      · 支持数字小键盘；若 NumLock 关闭（小键盘发方向键），也会把
-        小键盘的 0~9/小数点映射为数字；
-      · 失去焦点或回车时自动解析并按千分位格式化。
+      · 支持数字小键盘；NumLock 关闭时小键盘会发方向/编辑键，这里按
+        物理扫描码把它们映射回数字，不再要求用户必须打开 NumLock；
+      · 失去焦点或回车时自动解析并按 formatter 格式化。
     """
 
 
-    def __init__(self, amount, formatter, parent=None):
+    def __init__(self, amount, formatter, parent=None, tooltip=None):
         super().__init__(parent)
         self._fmt = formatter
         self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.setFont(QFont("Microsoft YaHei", 9))
-        self.setToolTip("可直接输入金额（支持数字小键盘、两位小数；若小键盘无效请确认 NumLock 已开启）")
+        self.setToolTip(tooltip or
+                        "可直接输入数值（支持数字小键盘，NumLock 开启或关闭均可）")
         self.setText(formatter(amount))
         self.editingFinished.connect(self._normalize)
 
@@ -425,26 +433,75 @@ class AmountEdit(QLineEdit):
         Qt.Key_Right: '6', Qt.Key_Home: '7', Qt.Key_Up: '8',
         Qt.Key_PageUp: '9', Qt.Key_Delete: '.', Qt.Key_Comma: '.',
     }
-    # 银河麒麟/UOS 等 Linux(X11) 下 NumLock 关闭时，小键盘会发方向键且
-    # 不一定带 KeypadModifier，用 X11 keycode 再兜底映射一次
-    _LINUX_NUMPAD_SCAN = {
+    # 物理扫描码兜底映射。NumLock 关闭时 Windows 下 Qt 不设置
+    # KeypadModifier，只能靠扫描码识别小键盘；X11 的 keycode 和 macOS 的
+    # 虚拟键码数值与 Windows 不同，必须按平台分开。
+    _NUMPAD_SCAN_WIN = {
+        # Windows 扫描码（键位 789 / 456 / 123 / 0 . - +）
+        0x47: '7', 0x48: '8', 0x49: '9',
+        0x4B: '4', 0x4C: '5', 0x4D: '6',
+        0x4F: '1', 0x50: '2', 0x51: '3',
+        0x52: '0', 0x53: '.', 0x4A: '-', 0x4E: '+',
+    }
+    # 银河麒麟/UOS 等 Linux(X11)：小键盘方向键不一定带 KeypadModifier
+    _NUMPAD_SCAN_X11 = {
         79: '7', 80: '8', 81: '9',
         83: '4', 84: '5', 85: '6',
         87: '1', 88: '2', 89: '3',
-        90: '0', 91: '.',
+        90: '0', 91: '.', 82: '-', 86: '+',
+    }
+    _NUMPAD_SCAN_MAC = {
+        89: '7', 91: '8', 92: '9',
+        86: '4', 87: '5', 88: '6',
+        83: '1', 84: '2', 85: '3',
+        82: '0', 65: '.', 78: '-', 69: '+',
     }
 
+    @staticmethod
+    def _numlock_on():
+        """Windows 下 NumLock 是否开启（其他平台返回 False，走扫描码映射）。"""
+        if not sys.platform.startswith('win'):
+            return False
+        try:
+            import ctypes
+            return bool(ctypes.windll.user32.GetKeyState(0x90) & 1)
+        except Exception:
+            return False
+
     def keyPressEvent(self, event):
-        # 保证数字小键盘（含 NumLock 关闭的情况）可用
+        # 1) 带 KeypadModifier 的小键盘方向/编辑键 → 数字
         if event.modifiers() & Qt.KeypadModifier:
             ch = self._NUMPAD_KEYS.get(event.key())
             if ch is not None:
                 self.insert(ch)
                 return
-        if (sys.platform.startswith('linux') and not event.text()
-                and event.nativeScanCode() in self._LINUX_NUMPAD_SCAN):
-            self.insert(self._LINUX_NUMPAD_SCAN[event.nativeScanCode()])
-            return
+        # 2) 没有文本输入的方向/编辑键 → 按物理扫描码识别小键盘
+        #    （NumLock 关闭时小键盘发方向键，event.text() 为空）
+        if not event.text():
+            scan = int(event.nativeScanCode() or 0)
+            if sys.platform.startswith('win'):
+                # NumLock 开启时方向键是真正的方向键，不做映射
+                char = (None if self._numlock_on()
+                        else self._NUMPAD_SCAN_WIN.get(scan))
+            elif sys.platform == 'darwin':
+                char = self._NUMPAD_SCAN_MAC.get(scan)
+            else:
+                char = self._NUMPAD_SCAN_X11.get(scan)
+            if char is not None:
+                self.insert(char)
+                return
+        # 3) 兜底：个别环境（远程桌面/虚拟键盘）数字键不带 text
+        if not event.text():
+            key = event.key()
+            if Qt.Key_0 <= key <= Qt.Key_9:
+                self.insert(chr(key))
+                return
+            if key == Qt.Key_Minus:
+                self.insert('-')
+                return
+            if key in (Qt.Key_Period, Qt.Key_Comma):
+                self.insert('.')
+                return
         super().keyPressEvent(event)
 
 
@@ -792,7 +849,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(grp_folder)
 
         # ====== 第二部分：调整值设置（可自由增删的调整项） ======
-        grp_adj = QGroupBox("调整值设置（可自由增删调整项）")
+        grp_adj = QGroupBox("调整值设置（汇率 + 可自由增删调整项）")
         grp_adj.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
         adj_layout = QVBoxLayout(grp_adj)
         adj_layout.setSpacing(6)
@@ -808,6 +865,27 @@ class MainWindow(QMainWindow):
         tip.setStyleSheet("color:#555;")
         tip.setFont(QFont("Microsoft YaHei", 8))
         adj_layout.addWidget(tip)
+
+        # 汇率：A2411 为外币报表（余额单位万美元），取数时折算为万元人民币
+        rate_row = QHBoxLayout()
+        rate_row.setSpacing(8)
+        rate_label = QLabel("A2411 外币折人民币汇率:")
+        rate_label.setFont(QFont("Microsoft YaHei", 9))
+        rate_row.addWidget(rate_label)
+        self.ed_fx = AmountEdit(
+            DEFAULT_FX_RATE, lambda v: f"{v:.4f}", self,
+            tooltip="1 美元折人民币元（如 7.1053）。\n"
+                    "A2411 月报表余额单位为万美元，取数时按「余额 × 汇率」\n"
+                    "折算为万元人民币；A1411 人民币报表不折算。")
+        self.ed_fx.setFixedWidth(110)
+        rate_row.addWidget(self.ed_fx)
+        rate_tip = QLabel("A2411 余额单位为万美元，取数时按「余额 × 汇率」"
+                          "折算为万元人民币；A1411 人民币报表不折算。")
+        rate_tip.setStyleSheet("color:#555;")
+        rate_tip.setFont(QFont("Microsoft YaHei", 8))
+        rate_tip.setWordWrap(True)
+        rate_row.addWidget(rate_tip, 1)
+        adj_layout.addLayout(rate_row)
 
         self.tb_adj = QTableWidget(0, 6)
         self.tb_adj.setHorizontalHeaderLabels(
@@ -1226,6 +1304,23 @@ class MainWindow(QMainWindow):
         for item in normalize_adjustments(items):
             self._add_adj_row(item)
 
+    def _get_fx_rate(self):
+        """读取界面上的 A2411 外币折算汇率（1 美元折人民币元）。"""
+        try:
+            return float(self.ed_fx.value())
+        except Exception:
+            return 0.0
+
+    def _set_fx_rate(self, rate):
+        """设置汇率输入框；rate 为空或非法时恢复默认值。"""
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            value = DEFAULT_FX_RATE
+        if value <= 0:
+            value = DEFAULT_FX_RATE
+        self.ed_fx.setText(f"{value:.4f}")
+
     @staticmethod
     def _fmt_amount(value):
         """金额展示：整数不带小数，非整数保留两位。"""
@@ -1255,7 +1350,8 @@ class MainWindow(QMainWindow):
             folder (str): 工作目录
 
         返回:
-            list[dict] or None: 调整项列表；文件不存在或读取失败返回 None
+            dict or None: {'items': 调整项列表, 'fx_rate': 汇率或None}；
+                          文件不存在或读取失败返回 None
         """
         path = os.path.join(folder, ADJ_CONFIG_NAME) if folder else ''
         if not path or not os.path.exists(path):
@@ -1264,6 +1360,13 @@ class MainWindow(QMainWindow):
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             items = data.get('items') if isinstance(data, dict) else data
+            # A2411 外币折算汇率（旧版配置没有该字段，返回 None 用默认值）
+            fx_rate = None
+            if isinstance(data, dict) and data.get('fx_rate') not in (None, ''):
+                try:
+                    fx_rate = float(data['fx_rate'])
+                except (TypeError, ValueError):
+                    fx_rate = None
             # 旧版配置（无 version 字段）里"存款归属表"指科目侧、"A1411、2411合计表"
             # 指 A1411/A2411 侧；新表名已互换，这里按版本迁移后再规范化
             version = data.get('version', 1) if isinstance(data, dict) else 1
@@ -1309,7 +1412,7 @@ class MainWindow(QMainWindow):
                    str(it.get('name') or '') for it in merged):
                 self._log("[调整值] 提示：配置中仍有会计科目侧的旧久悬调整项，"
                           "若新模板已自动取久悬科目余额，请核对是否重复计算")
-            return merged or None
+            return {'items': merged or None, 'fx_rate': fx_rate}
         except Exception as e:
             self._log(f"[调整值] 配置文件读取失败: {e}")
             return None
@@ -1325,8 +1428,10 @@ class MainWindow(QMainWindow):
             return
         try:
             items = self._get_adjustments()
+            fx_rate = self._get_fx_rate()
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump({'version': 2, 'items': items}, f,
+                json.dump({'version': 3, 'items': items,
+                           'fx_rate': fx_rate}, f,
                           ensure_ascii=False, indent=2)
         except Exception as e:
             self._log(f"[调整值] 配置保存失败: {e}")
@@ -1495,17 +1600,25 @@ class MainWindow(QMainWindow):
 
     def _refresh_adjustments(self, att5_paths):
         """
-        工作目录变化时刷新调整项：优先载入本地配置，其次附件5，
+        工作目录变化时刷新调整项与汇率：优先载入本地配置，其次附件5，
         再次保留当前内容，最后用标准项初始化。
 
         参数:
             att5_paths (list[str]): 该目录下的附件5 候选路径
         """
-        items = self._load_adjust_config(self._get_folder())
-        if items:
-            self._set_adjustments(items)
-            self._log(f"[调整值] 已载入配置: {ADJ_CONFIG_NAME}")
-            return
+        cfg = self._load_adjust_config(self._get_folder())
+        if cfg:
+            self._set_fx_rate(cfg.get('fx_rate'))
+            if cfg.get('fx_rate'):
+                self._log(f"[调整值] A2411 外币折算汇率: "
+                          f"{cfg['fx_rate']:.4f}（1 美元折人民币元）")
+            items = cfg.get('items')
+            if items:
+                self._set_adjustments(items)
+                self._log(f"[调整值] 已载入配置: {ADJ_CONFIG_NAME}")
+                return
+        else:
+            self._set_fx_rate(None)
         # 已手工填写金额时保留当前内容；否则用附件5（若有）重建标准调整项
         if any(it['amount'] for it in self._get_adjustments()):
             return
@@ -1615,7 +1728,8 @@ class MainWindow(QMainWindow):
         执行操作1：生成保费基数核对表。
 
         数据来源：
-          - 存款归属表 ← A1411 / A2411 月报表（万元）
+          - 存款归属表 ← A1411 / A2411 月报表（万元；A2411 为万美元，
+            按界面的汇率折算后与 A1411 相加）
           - 会计科目表 ← 科目余额表（元）
           - 被保险存款申报表（IRP001）← IRP001 申报表（元）
         各数据块所在列按模板表头自动识别（旧版/新版附5模板均支持），
@@ -1670,6 +1784,14 @@ class MainWindow(QMainWindow):
                       f"建议关闭该文件后重新生成，避免保存时互相覆盖")
 
         adjustments = self._get_adjustments()
+        fx_rate = self._get_fx_rate()
+        if fx_rate <= 0:
+            QMessageBox.warning(
+                self, "请填写汇率",
+                "A2411 月报表为外币报表（余额单位：万美元），"
+                "需要填写折算汇率后才能生成。\n\n"
+                "请在「调整值设置」中填写：1 美元折人民币元（如 7.1053）。")
+            return
         self._save_adjust_config()
 
         self.btn_base.setEnabled(False)
@@ -1678,6 +1800,7 @@ class MainWindow(QMainWindow):
         self._log(">>> 开始生成保费基数核对表（存款归属表 + 会计科目表）")
         self._log(f"A1411: {a1411}")
         self._log(f"A2411: {a2411}")
+        self._log(f"A2411 汇率: {fx_rate:.4f}（余额(万美元) × 汇率 = 万元人民币）")
         self._log(f"科目余额表: {bal}")
         self._log(f"IRP001: {irp001}")
         self._log(f"模板（{tpl_source}）: {tpl}")
@@ -1690,7 +1813,7 @@ class MainWindow(QMainWindow):
             attachment2=att2 if att2 and os.path.exists(att2) else None,
             attachment3=att3 if att3 and os.path.exists(att3) else None,
             attachment4=att4 if att4 and os.path.exists(att4) else None,
-            adjustments=adjustments)
+            adjustments=adjustments, fx_rate=fx_rate)
         self.thr_base.progress.connect(self._log)
         self.thr_base.finished.connect(self._base_done)
         self.thr_base.error.connect(self._base_err)

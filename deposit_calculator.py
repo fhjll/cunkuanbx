@@ -10,7 +10,7 @@
 
 数据来源：
   - A1411 月报表（资产负债表）：各类存款的期末余额（单位：元）
-  - A2411 月报表（补充报表）：补充科目数据（单位：元）
+  - A2411 月报表（补充报表）：补充科目数据（外币，单位：万美元）
   - 附件2：住房公积金明细表（用于核对住房公积金存款）
   - 附件3：社保基金存款明细表（用于核对社保基金存款）
 
@@ -28,7 +28,8 @@
   - 非计算行：按各自科目代码独立取数填列，不参与任何子项汇总
 
 单位说明：
-  - A1411/A2411：元
+  - A1411：万元人民币（不折算）
+  - A2411：万美元（外币报表），按汇率折算为万元人民币（余额 × 汇率）
   - 存款归属表：万元（输出时已转换）
   - 附件：元（读取后除以 10000 转换为万元）
 
@@ -185,8 +186,9 @@ class DepositCalculator:
 
     def __init__(self):
         """初始化计算器，清空所有数据容器"""
-        self.a1411_data = {}          # A1411 数据字典 {科目代码: 余额}
-        self.a2411_data = {}          # A2411 数据字典 {科目代码: 余额}
+        self.a1411_data = {}          # A1411 数据字典 {科目代码: 余额(万元)}
+        self.a2411_data = {}          # A2411 数据字典 {科目代码: 余额(万美元)}
+        self.fx_rate = 1.0            # A2411 外币折算汇率（1 美元折人民币元）
         self.not_found_a1411 = []     # 未在 A1411 中找到的代码列表
         self.not_found_a2411 = []     # 未在 A2411 中找到的代码列表
         self.messages = []            # 运行日志消息列表
@@ -265,11 +267,30 @@ class DepositCalculator:
     # 数据查询
     # ----------------------------------------------------------
 
+    def set_exchange_rate(self, rate):
+        """
+        设置 A2411 外币折算汇率（1 美元折人民币元）。
+
+        A2411 月报表的余额单位为万美元，存款归属表为万元人民币，
+        取数时按“余额 × 汇率”折算；A1411 为人民币，不折算。
+        rate <= 0 视为未设置，保持 1.0（不折算）。
+
+        参数:
+            rate (float): 汇率，如 7.1053
+        """
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            value = 0.0
+        self.fx_rate = value if value > 0 else 1.0
+        self.messages.append(
+            f"A2411 汇率: {self.fx_rate:.4f}（余额(万美元) × 汇率 → 万元人民币）")
+
     def lookup(self, code_a1411, code_a2411):
         """
         查询科目代码对应的余额值。
 
-        同时查询 A1411 和 A2411，返回两者相加的结果。
+        同时查询 A1411 和 A2411，A2411 按 fx_rate 折算后与 A1411 相加。
         如果代码不存在，记录到 not_found 列表中以便诊断。
 
         参数:
@@ -277,10 +298,11 @@ class DepositCalculator:
             code_a2411 (str): A2411 科目代码（可空）
 
         返回:
-            float: 查询到的余额合计值
+            float: 查询到的余额合计值（万元人民币）
         """
         v1 = self.a1411_data.get(code_a1411, 0.0) if code_a1411 else 0.0
-        v2 = self.a2411_data.get(code_a2411, 0.0) if code_a2411 else 0.0
+        v2 = (self.a2411_data.get(code_a2411, 0.0) * self.fx_rate
+              if code_a2411 else 0.0)
         if code_a1411 and code_a1411 not in self.a1411_data:
             self.not_found_a1411.append(code_a1411)
         if code_a2411 and code_a2411 not in self.a2411_data:

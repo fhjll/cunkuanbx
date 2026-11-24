@@ -6,7 +6,8 @@
 
 功能说明：
   按《保费基数核对表（模板）》把三块数据填进同一张表：
-    1. 存款归属表 —— 取自 A1411 / A2411 月报表（万元）
+    1. 存款归属表 —— 取自 A1411 / A2411 月报表（A1411 万元人民币；
+       A2411 万美元，按汇率折算为万元人民币）
     2. 会计科目表 —— 取自科目余额表（元）
     3. 被保险存款申报表（IRP001）—— 取自 IRP001 申报表（元）
   各数据块所在列按模板表头自动识别（旧版模板：存款归属 C~F、会计科目 G~M、
@@ -48,7 +49,8 @@
   差额说明列第7/8行保存"由单位调整至个人"的个人侧净额（本金/利息），供外部核对。
 
 单位说明：
-  - A1411/A2411：万元（与会计科目表口径一致，无需换算）
+  - A1411：万元人民币（不折算）
+  - A2411：万美元（外币报表），按汇率折算为万元人民币（余额 × 汇率）
   - 科目余额表：元
   - IRP001：元
   - 附件：元
@@ -931,7 +933,7 @@ class BaseChecker:
     def __init__(self):
         """初始化生成器，清空全部数据容器"""
         self.a1411_data = {}      # A1411 {科目代码: 余额（万元）}
-        self.a2411_data = {}      # A2411 {科目代码: 余额（万元）}
+        self.a2411_data = {}      # A2411 {科目代码: 余额（万美元）}
         self.acct_data = {}       # 科目余额表 {科目代码: {'debit':借方,'credit':贷方}}
         self.irp001_p = {}        # IRP001 {(章节关键词, 项目关键词): 本金（元）}
         self.irp001_i = {}        # IRP001 {(章节关键词, 项目关键词): 应付利息（元）}
@@ -940,6 +942,7 @@ class BaseChecker:
         self.att4_p = None        # 附件4（高管人员）本金合计（元）
         self.att4_i = None        # 附件4（高管人员）应付利息合计（元）
         self.adjustments = []     # 调整项列表（见 set_adjustments）
+        self.fx_rate = 1.0        # A2411 外币折算汇率（1 美元折人民币元）
         self.not_found_a1411 = []
         self.not_found_a2411 = []
         self.not_found_acct = []
@@ -997,7 +1000,7 @@ class BaseChecker:
         self.messages.append(f"A1411: {len(self.a1411_data)} 个指标")
 
     def load_a2411(self, filepath):
-        """加载 A2411 月报表（外币，万元）"""
+        """加载 A2411 月报表（外币，余额单位：万美元；取数时按汇率折算）"""
         self._load_monthly_report(filepath, self.a2411_data,
                                   self.not_found_a2411, 'A2411')
         self.messages.append(f"A2411: {len(self.a2411_data)} 个指标")
@@ -1141,22 +1144,43 @@ class BaseChecker:
         """
         self.adjustments = normalize_adjustments(items)
 
+    def set_exchange_rate(self, rate):
+        """
+        设置 A2411 外币折算汇率（1 美元折人民币元）。
+
+        A2411 月报表的余额单位为万美元，而存款归属表为万元人民币，
+        因此 A2411 的取数需要按“余额 × 汇率”折算；A1411 为人民币，
+        不折算。rate <= 0 视为未设置，保持 1.0（不折算）。
+
+        参数:
+            rate (float): 汇率，如 7.1053
+        """
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            value = 0.0
+        self.fx_rate = value if value > 0 else 1.0
+        self.messages.append(
+            f"A2411 外币折算汇率: {self.fx_rate:.4f}"
+            f"（余额(万美元) × 汇率 → 万元人民币）")
+
     # ----------------------------------------------------------
     # 取数
     # ----------------------------------------------------------
 
     def lookup_monthly(self, code_str):
         """
-        按子项代码从 A1411/A2411 取数（万元）。
+        按子项代码从 A1411/A2411 取数（万元人民币）。
 
         代码格式："12MI1/22MI1"（A1411代码 / A2411代码）、
         "22MMU"（仅 A2411）、"12MI1"（仅 A1411）。
+        A2411 为外币报表（余额单位万美元），按 fx_rate 折算为万元人民币。
 
         参数:
             code_str (str): 子项代码
 
         返回:
-            float: A1411 与 A2411 取值之和（万元）
+            float: A1411 与 A2411（折算后）取值之和（万元）
         """
         c1, c2 = _parse_sub_code(code_str)
         v1 = v2 = 0.0
@@ -1167,7 +1191,7 @@ class BaseChecker:
                 self.not_found_a1411.append(c1)
         if c2:
             if c2 in self.a2411_data:
-                v2 = self.a2411_data[c2]
+                v2 = self.a2411_data[c2] * self.fx_rate
             else:
                 self.not_found_a2411.append(c2)
         return v1 + v2
@@ -1467,6 +1491,7 @@ class BaseChecker:
         _append_comment(ws_main, 2, 1,
                         f"本表由『存款保险申报表审核工具』于 "
                         f"{time.strftime('%Y-%m-%d %H:%M:%S')} 生成；"
+                        f"A2411 汇率 {self.fx_rate:.4f}；"
                         f"调整项 {len(normalize_adjustments(self.adjustments))} 项"
                         f"（明细见相关合计单元格批注）")
 
